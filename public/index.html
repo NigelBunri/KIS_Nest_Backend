@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Feed &amp; Broadcast Comments</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page stack">
+      <header class="hero card">
+        <div>
+          <p class="eyebrow">Realtime commentary</p>
+          <h1>LinkedIn-style comments wired to Nest WS</h1>
+          <p class="muted">
+            Assign a conversation to each feed or broadcast, then post and watch live replies stream
+            through the same Nest messaging core without jumping into a dedicated chat room.
+          </p>
+        </div>
+      </header>
+
+      <section class="server-panel card">
+        <div class="panel-header">
+          <div>
+            <span class="badge">WebSocket</span>
+            <span class="muted small">Nest backend</span>
+          </div>
+          <div id="wsStatus" class="small muted">disconnected</div>
+        </div>
+        <div class="row">
+          <label for="serverUrl">Server URL</label>
+          <input id="serverUrl" placeholder="https://localhost:4000" />
+          <label for="wsPath">WS Path</label>
+          <input id="wsPath" placeholder="/ws" />
+          <button id="connect" class="primary">Connect</button>
+          <button id="disconnect" class="ghost" disabled>Disconnect</button>
+        </div>
+        <div class="row">
+          <label for="authToken">Auth token</label>
+          <input id="authToken" placeholder="Bearer eyJ..." style="flex:1" />
+        </div>
+        <div class="row small muted">
+          Token is optional unless the gateway requires it; each section needs a conversation ID to open.
+        </div>
+      </section>
+
+      <section class="feeds-panel card">
+        <div class="panel-header">
+          <div>
+            <span class="badge">Feeds</span>
+            <span class="muted small">Pick a conversation for each stream</span>
+          </div>
+          <button id="clearAssignments" class="ghost small">Reset selections</button>
+        </div>
+        <div id="feedGrid" class="feed-grid"></div>
+      </section>
+
+      <section class="log-panel card">
+        <div class="panel-header">
+          <div>
+            <span class="badge">Activity</span>
+            <span class="muted small">connection &amp; message events</span>
+          </div>
+        </div>
+        <div id="activityLog" class="logs"></div>
+      </section>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
