@@ -19,11 +19,12 @@ export class MessagesService {
    */
   async createIdempotentLegacy(params: {
     senderId: string
+    senderDeviceId?: string
     senderName?: string
     seq: number
     input: SendMessageDto
   }): Promise<MessageDocument> {
-    const { senderId, seq, input } = params
+    const { senderId, senderDeviceId, seq, input } = params
 
     this.assertKindPayloadConsistency(input)
 
@@ -44,9 +45,15 @@ export class MessagesService {
 
       threadId: (input as any).threadId,
 
+      senderDeviceId,
       text: input.text,
       ciphertext: (input as any).ciphertext,
       encryptionMeta: (input as any).encryptionMeta,
+      iv: (input as any).iv,
+      tag: (input as any).tag,
+      aad: (input as any).aad,
+      encryptionVersion: (input as any).encryptionVersion,
+      encryptionKeyVersion: (input as any).encryptionKeyVersion,
       styledText: input.styledText,
       voice: input.voice,
       sticker: input.sticker,
@@ -100,6 +107,7 @@ export class MessagesService {
 
     const doc = await this.createIdempotentLegacy({
       senderId: args.senderId,
+      senderDeviceId: args.senderDeviceId,
       seq: args.seq,
       input: legacyInput,
     })
@@ -145,6 +153,13 @@ export class MessagesService {
       messageId: args.messageId,
       editorId: args.senderId,
       text: args.input.text,
+      ciphertext: (args.input as any).ciphertext,
+      encryptionMeta: (args.input as any).encryptionMeta,
+      iv: (args.input as any).iv,
+      tag: (args.input as any).tag,
+      aad: (args.input as any).aad,
+      encryptionVersion: (args.input as any).encryptionVersion,
+      encryptionKeyVersion: (args.input as any).encryptionKeyVersion,
       // if later you support styledText edits, map it here
       // styledText: (args.input as any).styledText,
     })
@@ -160,6 +175,11 @@ export class MessagesService {
     editorDeviceId?: string
     ciphertext?: string
     encryptionMeta?: Record<string, any>
+    iv?: string
+    tag?: string
+    aad?: string
+    encryptionVersion?: string
+    encryptionKeyVersion?: string
     text?: string
     attachments?: any[]
     nowMs?: number
@@ -182,6 +202,11 @@ export class MessagesService {
 
     if (typeof input.ciphertext === 'string') (msg as any).ciphertext = input.ciphertext
     if (input.encryptionMeta && typeof input.encryptionMeta === 'object') (msg as any).encryptionMeta = input.encryptionMeta
+    if (typeof input.iv === 'string') (msg as any).iv = input.iv
+    if (typeof input.tag === 'string') (msg as any).tag = input.tag
+    if (typeof input.aad === 'string') (msg as any).aad = input.aad
+    if (typeof input.encryptionVersion === 'string') (msg as any).encryptionVersion = input.encryptionVersion
+    if (typeof input.encryptionKeyVersion === 'string') (msg as any).encryptionKeyVersion = input.encryptionKeyVersion
 
     ;(msg as any).isEdited = true
     ;(msg as any).editedAt = nowMs

@@ -136,6 +136,21 @@ export class SendMessageDto {
   @IsOptional() @IsObject()
   encryptionMeta?: Record<string, any>;
 
+  @IsOptional() @IsString()
+  iv?: string;
+
+  @IsOptional() @IsString()
+  tag?: string;
+
+  @IsOptional() @IsString()
+  aad?: string;
+
+  @IsOptional() @IsString()
+  encryptionVersion?: string;
+
+  @IsOptional() @IsString()
+  encryptionKeyVersion?: string;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => StyledTextDto)

@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import crypto from 'crypto';
 import https from 'https';
+import { signedInternalHeaders } from '../security/internal-signing';
 
 export type AuthPrincipal = {
   userId: string;
@@ -23,9 +24,24 @@ function ensureTrailingSlash(u: string) {
 
 @Injectable()
 export class DjangoAuthService {
-  private readonly sharedJwtSecret = (process.env.DJANGO_JWT_SECRET ?? process.env.JWT_SECRET ?? '').trim();
-  private readonly tokenIssuer = (process.env.DJANGO_JWT_ISSUER ?? process.env.JWT_ISSUER ?? '').trim();
-  private readonly tokenAudience = (process.env.DJANGO_JWT_AUDIENCE ?? process.env.JWT_AUDIENCE ?? '').trim();
+  private readonly sharedJwtSecret = (
+    process.env.DJANGO_JWT_SECRET ??
+    process.env.JWT_SECRET ??
+    ''
+  ).trim();
+  private readonly strictJwtClaims =
+    ((process.env.DJANGO_JWT_STRICT ?? process.env.JWT_STRICT ?? '').trim() ||
+      (process.env.NODE_ENV === 'production' ? '1' : '0')) === '1';
+  private readonly tokenIssuers = this.buildAllowedValues([
+    process.env.DJANGO_JWT_ISSUER,
+    process.env.JWT_ISSUER,
+    process.env.DJANGO_BASE_URL,
+    this.getOrigin(process.env.DJANGO_INTROSPECT_URL),
+  ]);
+  private readonly tokenAudiences = this.buildAllowedValues([
+    process.env.DJANGO_JWT_AUDIENCE,
+    process.env.JWT_AUDIENCE,
+  ]);
 
   async introspect(token: string): Promise<AuthPrincipal> {
     const rawUrl = process.env.DJANGO_INTROSPECT_URL;
@@ -45,7 +61,7 @@ export class DjangoAuthService {
       const { data, status } = await axios.get(url, {
         headers: {
           Authorization: `${scheme} ${token}`,
-          'X-Internal-Auth': internal,
+          ...signedInternalHeaders({ method: 'GET', url, secret: internal }),
           Accept: 'application/json',
         },
         timeout: 4000,
@@ -91,31 +107,37 @@ export class DjangoAuthService {
       throw new UnauthorizedException('Invalid token payload');
     }
 
-    const username =
-      String(
-        data?.username ??
+    const username = String(
+      data?.username ??
         data?.display_name ??
         (data?.email ? data.email.split('@')[0] : '') ??
-        'user'
-      );
+        'user',
+    );
 
-    const isPremium =
-      Boolean(
-        data?.isPremium ??
-        (typeof data?.tier === 'string' && data.tier.toLowerCase() !== 'basic') ??
-        data?.entitlements?.premium === true
-      );
+    const isPremium = Boolean(
+      data?.isPremium ??
+        (typeof data?.tier === 'string' &&
+          data.tier.toLowerCase() !== 'basic') ??
+        data?.entitlements?.premium === true,
+    );
 
-    const scopes =
-      Array.isArray(data?.scopes)
-        ? data.scopes
-        : (data?.entitlements && typeof data.entitlements === 'object')
-          ? Object.keys(data.entitlements).filter((k) => data.entitlements[k] === true)
-          : [];
+    const scopes = Array.isArray(data?.scopes)
+      ? data.scopes
+      : data?.entitlements && typeof data.entitlements === 'object'
+        ? Object.keys(data.entitlements).filter(
+            (k) => data.entitlements[k] === true,
+          )
+        : [];
 
     const deviceId = data?.device_id ?? data?.deviceId ?? undefined;
 
-    return { userId, username, isPremium, deviceId: deviceId ? String(deviceId) : undefined, scopes };
+    return {
+      userId,
+      username,
+      isPremium,
+      deviceId: deviceId ? String(deviceId) : undefined,
+      scopes,
+    };
   }
 
   private decodeAndValidateJwt(token: string) {
@@ -125,7 +147,10 @@ export class DjangoAuthService {
     }
     const [header, payload, signature] = parts;
     const signingInput = `${header}.${payload}`;
-    const expectedSig = crypto.createHmac('sha256', this.sharedJwtSecret).update(signingInput).digest('base64url');
+    const expectedSig = crypto
+      .createHmac('sha256', this.sharedJwtSecret)
+      .update(signingInput)
+      .digest('base64url');
     if (signature !== expectedSig) {
       throw new Error('Invalid JWT signature');
     }
@@ -139,14 +164,32 @@ export class DjangoAuthService {
     if (typeof decoded.nbf === 'number' && now < decoded.nbf) {
       throw new Error('Token not active yet');
     }
-    if (this.tokenIssuer && decoded.iss !== this.tokenIssuer) {
-      throw new Error('Invalid token issuer');
+    if (this.tokenIssuers.length > 0) {
+      const issuerOk = this.tokenIssuers.includes(String(decoded.iss ?? ''));
+      if (!issuerOk) {
+        const error = new Error('Invalid token issuer');
+        if (this.strictJwtClaims) throw error;
+        console.warn('⚠️ Accepting JWT with issuer drift in non-strict mode', {
+          tokenIssuer: decoded.iss,
+          allowedIssuers: this.tokenIssuers,
+        });
+      }
     }
-    if (this.tokenAudience) {
+    if (this.tokenAudiences.length > 0) {
       const audClaim = decoded.aud;
-      const validAudience = Array.isArray(audClaim) ? audClaim.includes(this.tokenAudience) : audClaim === this.tokenAudience;
+      const validAudience = Array.isArray(audClaim)
+        ? audClaim.some((aud) => this.tokenAudiences.includes(String(aud)))
+        : this.tokenAudiences.includes(String(audClaim ?? ''));
       if (!validAudience) {
-        throw new Error('Invalid token audience');
+        const error = new Error('Invalid token audience');
+        if (this.strictJwtClaims) throw error;
+        console.warn(
+          '⚠️ Accepting JWT with audience drift in non-strict mode',
+          {
+            tokenAudience: audClaim,
+            allowedAudiences: this.tokenAudiences,
+          },
+        );
       }
     }
 
@@ -160,34 +203,62 @@ export class DjangoAuthService {
   }
 
   private mapPayloadToPrincipal(payload: Record<string, any>): AuthPrincipal {
-    const userId = String(payload?.user_id ?? payload?.sub ?? payload?.id ?? '');
+    const userId = String(
+      payload?.user_id ?? payload?.sub ?? payload?.id ?? '',
+    );
     if (!userId) {
       throw new UnauthorizedException('Token payload missing user id');
     }
 
-    const username =
-      String(
-        payload?.username ??
+    const username = String(
+      payload?.username ??
         payload?.display_name ??
         (payload?.email ? (payload.email as string).split('@')[0] : '') ??
-        'user'
-      );
+        'user',
+    );
 
-    const isPremium =
-      Boolean(
-        payload?.isPremium ??
-        (typeof payload?.tier === 'string' && payload.tier.toLowerCase() !== 'basic')
-      );
+    const isPremium = Boolean(
+      payload?.isPremium ??
+        (typeof payload?.tier === 'string' &&
+          payload.tier.toLowerCase() !== 'basic'),
+    );
 
-    const scopes =
-      Array.isArray(payload?.scopes)
-        ? payload.scopes
-        : (payload?.entitlements && typeof payload.entitlements === 'object')
-          ? Object.keys(payload.entitlements).filter((k) => payload.entitlements[k] === true)
-          : [];
+    const scopes = Array.isArray(payload?.scopes)
+      ? payload.scopes
+      : payload?.entitlements && typeof payload.entitlements === 'object'
+        ? Object.keys(payload.entitlements).filter(
+            (k) => payload.entitlements[k] === true,
+          )
+        : [];
 
     const deviceId = payload?.device_id ?? payload?.deviceId ?? undefined;
 
-    return { userId, username, isPremium, deviceId: deviceId ? String(deviceId) : undefined, scopes };
+    return {
+      userId,
+      username,
+      isPremium,
+      deviceId: deviceId ? String(deviceId) : undefined,
+      scopes,
+    };
+  }
+
+  private buildAllowedValues(values: Array<string | undefined>) {
+    return Array.from(
+      new Set(
+        values
+          .flatMap((value) => String(value ?? '').split(','))
+          .map((value) => value.trim().replace(/\/$/, ''))
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private getOrigin(value?: string) {
+    if (!value) return '';
+    try {
+      return new URL(value).origin;
+    } catch {
+      return '';
+    }
   }
 }

@@ -126,14 +126,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     })
 
     try {
-      await deps.e2eeKeysService.decryptMessagePayload(conversationId, payload)
+      const hasEncryptedPayload = !!(
+        payload?.ciphertext ||
+        payload?.encryptionMeta ||
+        payload?.encrypted
+      )
 
       await deps.rateLimitService.assert(principal, `send:${conversationId}`, 50)
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
       if (perms?.canSend === false) {
-        logger.warn(
-          `[messages] userId=${principal.userId} saw canSend=false for conversationId=${conversationId}, allowing send temporarily`,
-        )
+        throw new Error('Send not allowed in this conversation')
       }
       if (deps.moderationService) {
         await deps.moderationService.assertAllowed({
@@ -147,7 +149,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
           principal,
           conversationId,
           action: 'send',
-          text: payload?.text ?? '',
+          text: hasEncryptedPayload ? undefined : (payload?.text ?? ''),
         })
         if (policy?.allowed === false) {
           throw new Error(policy.reason || 'Policy blocked this message')
@@ -193,7 +195,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       void (async () => {
         try {
-          const preview = createdDto?.previewText ?? createdDto?.text ?? payload?.text
+          const preview = hasEncryptedPayload
+            ? 'Encrypted message'
+            : (createdDto?.previewText ?? createdDto?.text ?? payload?.text)
           await deps.djangoConversationClient.updateLastMessage({
             conversationId,
             createdAt: created.createdAt,
@@ -224,7 +228,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
                 toUserId: String(userId),
                 conversationId,
                 messageId: created.id,
-                preview: createdDto?.previewText ?? createdDto?.text ?? payload?.text,
+                preview: hasEncryptedPayload
+                  ? 'Encrypted message'
+                  : (createdDto?.previewText ?? createdDto?.text ?? payload?.text),
                 senderName: principal.username ?? undefined,
                 senderId: principal.userId,
               })
@@ -252,7 +258,10 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
     try {
       await deps.rateLimitService.assert(principal, `edit:${conversationId}`, 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (perms?.canSend === false) {
+        throw new Error('Edit not allowed in this conversation')
+      }
       if (deps.moderationService) {
         await deps.moderationService.assertAllowed({
           conversationId,
@@ -261,11 +270,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         })
       }
       if (deps.djangoConversationClient.policyCheck) {
+        const hasEncryptedPayload = !!(
+          payload?.ciphertext ||
+          payload?.encryptionMeta ||
+          payload?.encrypted
+        )
         const policy = await deps.djangoConversationClient.policyCheck({
           principal,
           conversationId,
           action: 'edit',
-          text: payload?.text ?? '',
+          text: hasEncryptedPayload ? undefined : (payload?.text ?? ''),
         })
         if (policy?.allowed === false) {
           throw new Error(policy.reason || 'Policy blocked this edit')
@@ -312,7 +326,10 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
     try {
       await deps.rateLimitService.assert(principal, `delete:${conversationId}`, 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (perms?.canSend === false) {
+        throw new Error('Delete not allowed in this conversation')
+      }
       if (deps.moderationService) {
         await deps.moderationService.assertAllowed({
           conversationId,

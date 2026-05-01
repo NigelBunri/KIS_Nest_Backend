@@ -3,7 +3,7 @@ import { Document, Types } from 'mongoose';
 
 export type CallSessionDocument = CallSession & Document;
 
-export type CallStatus = 'ringing' | 'active' | 'ended';
+export type CallStatus = 'ringing' | 'active' | 'ended' | 'missed';
 export type CallParticipantStatus =
   | 'invited'
   | 'connecting'
@@ -65,7 +65,7 @@ export class CallSession {
   @Prop({ type: String, required: true })
   createdBy!: string;
 
-  @Prop({ type: String, required: true, enum: ['ringing', 'active', 'ended'], index: true })
+  @Prop({ type: String, required: true, enum: ['ringing', 'active', 'ended', 'missed'], index: true })
   status!: CallStatus;
 
   @Prop({ type: Date, required: true, index: true })

@@ -20,8 +20,42 @@ export interface CallsDeps {
     assert(principal: SocketPrincipal, key: string, limit?: number): Promise<void> | void
   }
   callsService?: {
-    upsertState(args: { conversationId: string; state: Record<string, unknown> }): Promise<void>
-    clearState(args: { conversationId: string }): Promise<void>
+    createCallOrThrowIfActiveInConversation?(args: {
+      conversationId: string
+      callId: string
+      createdBy: string
+      media?: string
+      inviteeUserIds?: string[]
+    }): Promise<any>
+    ensureCallExistsOrThrow?(conversationId: string, callId: string): Promise<any>
+    markActive?(conversationId: string, callId: string): Promise<any>
+    setParticipantStatus?(
+      conversationId: string,
+      callId: string,
+      userId: string,
+      status: 'invited' | 'connecting' | 'joined' | 'left' | 'rejected' | 'busy',
+      reason?: string,
+    ): Promise<any>
+    appendSignal?(
+      conversationId: string,
+      callId: string,
+      evt: {
+        kind: 'offer' | 'answer' | 'ice' | 'renegotiate' | 'hangup'
+        fromUserId: string
+        toUserId?: string | null
+        payloadType?: string | null
+        createdAt?: Date
+      },
+    ): Promise<void>
+    endCall?(
+      conversationId: string,
+      callId: string,
+      endedByUserId: string,
+      reason?: string,
+    ): Promise<any>
+    endIfNoActiveParticipants?(conversationId: string, callId: string): Promise<void>
+    upsertState?(args: { conversationId: string; state: Record<string, unknown> }): Promise<void>
+    clearState?(args: { conversationId: string }): Promise<void>
   }
 }
 
@@ -43,15 +77,97 @@ function createCallHandler(
       await deps.rateLimitService?.assert(principal, `call:${event}`, 20)
       await deps.djangoConversationClient.assertMember(principal, conversationId)
 
-      if (event === EVT.CALL_OFFER && deps.callsService?.upsertState) {
-        await deps.callsService.upsertState({ conversationId, state: payload })
+      const callId = typeof payload?.callId === 'string' ? payload.callId : undefined
+      const enrichedPayload: Record<string, unknown> = {
+        ...(payload ?? {}),
+        conversationId,
+        fromUserId: principal.userId,
+        deviceId: principal.deviceId ?? null,
       }
 
-      if (event === EVT.CALL_END && deps.callsService?.clearState) {
-        await deps.callsService.clearState({ conversationId })
+      if (callId && deps.callsService) {
+        if (event === EVT.CALL_OFFER) {
+          const inviteeUserIds = Array.isArray(payload?.inviteeUserIds)
+            ? payload.inviteeUserIds.map(String).filter((id) => id && id !== principal.userId)
+            : []
+          if (deps.callsService.createCallOrThrowIfActiveInConversation) {
+            await deps.callsService.createCallOrThrowIfActiveInConversation({
+              conversationId,
+              callId,
+              createdBy: principal.userId,
+              media: typeof payload?.media === 'string' ? payload.media : undefined,
+              inviteeUserIds,
+            })
+          } else if (deps.callsService.upsertState) {
+            await deps.callsService.upsertState({ conversationId, state: payload })
+          }
+          await deps.callsService.appendSignal?.(conversationId, callId, {
+            kind: 'offer',
+            fromUserId: principal.userId,
+            payloadType: 'offer',
+          })
+        }
+
+        if (event === EVT.CALL_ANSWER) {
+          await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+          await deps.callsService.markActive?.(conversationId, callId)
+          await deps.callsService.setParticipantStatus?.(
+            conversationId,
+            callId,
+            principal.userId,
+            'joined',
+          )
+          enrichedPayload.acceptedBy = principal.userId
+          enrichedPayload.acceptedAt = new Date().toISOString()
+          await deps.callsService.appendSignal?.(conversationId, callId, {
+            kind: 'answer',
+            fromUserId: principal.userId,
+            payloadType: 'answer',
+          })
+        }
+
+        if (event === EVT.CALL_ICE) {
+          await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+          await deps.callsService.appendSignal?.(conversationId, callId, {
+            kind: 'ice',
+            fromUserId: principal.userId,
+            toUserId: typeof payload?.toUserId === 'string' ? payload.toUserId : null,
+            payloadType: typeof payload?.payloadType === 'string' ? payload.payloadType : 'ice',
+          })
+        }
+
+        if (event === EVT.CALL_END) {
+          const reason =
+            typeof payload?.reason === 'string' && payload.reason.trim()
+              ? payload.reason.trim()
+              : 'ended'
+          await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+          if (reason === 'rejected' || reason === 'busy') {
+            await deps.callsService.setParticipantStatus?.(
+              conversationId,
+              callId,
+              principal.userId,
+              reason === 'busy' ? 'busy' : 'rejected',
+              reason,
+            )
+            await deps.callsService.endIfNoActiveParticipants?.(conversationId, callId)
+          } else {
+            await deps.callsService.endCall?.(conversationId, callId, principal.userId, reason)
+          }
+          await deps.callsService.appendSignal?.(conversationId, callId, {
+            kind: 'hangup',
+            fromUserId: principal.userId,
+            payloadType: reason,
+          })
+          if (deps.callsService.clearState && !deps.callsService.endCall) {
+            await deps.callsService.clearState({ conversationId })
+          }
+          enrichedPayload.endedBy = principal.userId
+          enrichedPayload.endedAt = new Date().toISOString()
+        }
       }
 
-      safeEmit(server, rooms.convRoom(conversationId), event, payload)
+      safeEmit(server, rooms.convRoom(conversationId), event, enrichedPayload)
       safeAck(ack, ok({ delivered: true }))
     } catch (error: any) {
       logger.error(

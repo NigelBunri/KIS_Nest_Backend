@@ -203,6 +203,7 @@ export interface SendMessagePayload {
 
   encrypted?: boolean
   ciphertext?: string
+  encryptionMeta?: Record<string, any>
   iv?: string
   tag?: string
   encryptionVersion?: string
@@ -214,6 +215,14 @@ export interface EditMessagePayload {
   conversationId: string
   messageId: string
   text?: string
+  encrypted?: boolean
+  ciphertext?: string
+  encryptionMeta?: Record<string, any>
+  iv?: string
+  tag?: string
+  encryptionVersion?: string
+  encryptionKeyVersion?: string
+  aad?: string
   styledText?: StyledTextPayload
 }
 

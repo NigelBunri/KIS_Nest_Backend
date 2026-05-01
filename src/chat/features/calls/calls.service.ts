@@ -248,12 +248,23 @@ export class CallsService {
     reason?: string,
   ): Promise<CallSession | null> {
     const now = new Date()
+    const call = await this.calls.findOne({ conversationId, callId }).lean()
+    if (!call) return null
+
+    const anyJoined = call.participants.some((p) => p.status === 'joined')
+    const normalizedReason = String(reason ?? '').trim().toLowerCase()
+    const terminalStatus =
+      !anyJoined &&
+      call.status === 'ringing' &&
+      ['cancelled', 'canceled', 'missed', 'rejected', 'busy', 'no_answer'].includes(normalizedReason)
+        ? 'missed'
+        : 'ended'
 
     await this.calls.updateOne(
       { conversationId, callId, status: { $ne: 'ended' } },
       {
         $set: {
-          status: 'ended',
+          status: terminalStatus,
           endedAt: now,
           isActiveInConversation: false,
         },
@@ -272,7 +283,7 @@ export class CallsService {
   }
 
   async assertNotEnded(call: CallSession): Promise<void> {
-    if (call.status === 'ended') throw new Error('CALL_ALREADY_ENDED')
+    if (call.status === 'ended' || call.status === 'missed') throw new Error('CALL_ALREADY_ENDED')
   }
 
   async endIfNoActiveParticipants(conversationId: string, callId: string): Promise<void> {

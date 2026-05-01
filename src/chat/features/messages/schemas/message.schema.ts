@@ -216,6 +216,21 @@ export class Message {
   @Prop({ type: Object })
   encryptionMeta?: Record<string, any>;
 
+  @Prop()
+  iv?: string;
+
+  @Prop()
+  tag?: string;
+
+  @Prop()
+  aad?: string;
+
+  @Prop()
+  encryptionVersion?: string;
+
+  @Prop()
+  encryptionKeyVersion?: string;
+
   @Prop({ type: [ReactionEntrySchema], default: [] })
   reactions!: ReactionEntry[];
 
