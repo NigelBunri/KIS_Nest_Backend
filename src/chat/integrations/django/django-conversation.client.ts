@@ -70,10 +70,15 @@ export class DjangoConversationClient {
       });
       return perms;
     }
-    const url = process.env.DJANGO_CONV_PERMS_URL?.replace(
-      '{conversationId}',
-      conversationId,
-    );
+    const base = this.djangoApiBase();
+    const url =
+      process.env.DJANGO_CONV_PERMS_URL?.replace(
+        '{conversationId}',
+        conversationId,
+      ) ??
+      (base
+        ? `${base}/chat/conversations/${conversationId}/ws-perms/`
+        : undefined);
 
     if (!url) {
       throw new Error('DJANGO_CONV_PERMS_URL is not configured');
@@ -140,7 +145,7 @@ export class DjangoConversationClient {
     createdAt: Date;
     preview?: string;
   }) {
-    const base = process.env.DJANGO_API_URL;
+    const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_UPDATE_LAST_MESSAGE_URL ??
       (base
@@ -179,7 +184,7 @@ export class DjangoConversationClient {
     lastReadSeq: number;
     lastReadAt?: string | Date | null;
   }) {
-    const base = process.env.DJANGO_API_URL;
+    const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_UPDATE_READ_STATE_URL ??
       (base
@@ -224,7 +229,7 @@ export class DjangoConversationClient {
     if (isBroadcastConversation(conversationId)) {
       return [];
     }
-    const base = process.env.DJANGO_API_URL;
+    const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_MEMBER_IDS_URL ??
       (base
@@ -258,7 +263,7 @@ export class DjangoConversationClient {
     if (isBroadcastConversation(args.conversationId)) {
       return { allowed: true };
     }
-    const base = process.env.DJANGO_API_URL;
+    const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_POLICY_CHECK_URL ??
       (base
@@ -302,7 +307,7 @@ export class DjangoConversationClient {
     event: string;
     payload?: Record<string, any>;
   }): Promise<{ delivered: number }> {
-    const base = process.env.DJANGO_API_URL;
+    const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_WEBHOOK_DISPATCH_URL ??
       (base
@@ -332,5 +337,31 @@ export class DjangoConversationClient {
 
   private buildBroadcastPerms(): DjangoWsPermsResponse {
     return { isMember: true, isBlocked: false, canSend: true };
+  }
+
+  private djangoApiBase(): string | undefined {
+    const configured = String(process.env.DJANGO_API_URL ?? '').trim();
+    if (configured) return configured.replace(/\/+$/, '');
+
+    const introspectUrl = String(process.env.DJANGO_INTROSPECT_URL ?? '').trim();
+    if (!introspectUrl) return undefined;
+
+    try {
+      const parsed = new URL(introspectUrl);
+      const marker = '/api/v1/';
+      const markerIndex = parsed.pathname.indexOf(marker);
+      if (markerIndex >= 0) {
+        parsed.pathname = parsed.pathname.slice(0, markerIndex + marker.length - 1);
+        parsed.search = '';
+        parsed.hash = '';
+        return parsed.toString().replace(/\/+$/, '');
+      }
+      parsed.pathname = '/api/v1';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString().replace(/\/+$/, '');
+    } catch {
+      return undefined;
+    }
   }
 }

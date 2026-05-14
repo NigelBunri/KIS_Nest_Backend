@@ -134,15 +134,18 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       await deps.rateLimitService.assert(principal, `send:${conversationId}`, 50)
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
-      if (perms?.canSend === false) {
+
+      logger.log('[messages] perms result', perms)
+
+      const canSend =
+        perms?.canSend === true ||
+        (
+          perms?.isMember === true &&
+          perms?.isBlocked !== true &&
+          perms?.role === 'member'
+        )
+      if (!canSend) {
         throw new Error('Send not allowed in this conversation')
-      }
-      if (deps.moderationService) {
-        await deps.moderationService.assertAllowed({
-          conversationId,
-          userId: principal.userId,
-          action: 'send',
-        })
       }
       if (deps.djangoConversationClient.policyCheck) {
         const policy = await deps.djangoConversationClient.policyCheck({
@@ -156,10 +159,13 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         }
       }
 
-      const allocate = deps.djangoSeqClient.allocateSeq ?? deps.djangoSeqClient.allocate
-      if (!allocate) throw new Error('Seq allocator not configured')
-
-      const seq = await allocate(conversationId)
+      const seq = deps.djangoSeqClient.allocateSeq
+        ? await deps.djangoSeqClient.allocateSeq(conversationId)
+        : deps.djangoSeqClient.allocate
+        ? await deps.djangoSeqClient.allocate(conversationId)
+        : (() => {
+            throw new Error('Seq allocator not configured')
+          })()
 
       const created = await deps.messagesService.createIdempotent({
         senderId: principal.userId,
@@ -195,9 +201,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       void (async () => {
         try {
-          const preview = hasEncryptedPayload
+          const preview = createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
             ? 'Encrypted message'
-            : (createdDto?.previewText ?? createdDto?.text ?? payload?.text)
+            : (createdDto?.text ?? payload?.text))
           await deps.djangoConversationClient.updateLastMessage({
             conversationId,
             createdAt: created.createdAt,
@@ -218,9 +224,18 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
         try {
           const listMembers = deps.djangoConversationClient.listMemberIds
-          if (listMembers && deps.notificationsService) {
+          if (listMembers) {
             const memberIds = await listMembers(conversationId)
             for (const userId of memberIds) {
+              safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
+                event: EVT.MAIN_TAB_BADGES_UPDATED,
+                source: 'messages',
+                reason: 'message_created',
+                conversationId,
+                userId: String(userId),
+                at: new Date().toISOString(),
+              })
+              if (!deps.notificationsService) continue
               if (String(userId) === String(principal.userId)) continue
               const isOnline = await deps.presenceService?.isOnline?.(String(userId))
               if (isOnline) continue
@@ -228,9 +243,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
                 toUserId: String(userId),
                 conversationId,
                 messageId: created.id,
-                preview: hasEncryptedPayload
+                preview: createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
                   ? 'Encrypted message'
-                  : (createdDto?.previewText ?? createdDto?.text ?? payload?.text),
+                  : (createdDto?.text ?? payload?.text)),
                 senderName: principal.username ?? undefined,
                 senderId: principal.userId,
               })

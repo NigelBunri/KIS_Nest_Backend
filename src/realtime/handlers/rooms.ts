@@ -47,9 +47,6 @@ export function registerRoomHandlers(server: Server, socket: Socket, deps: Rooms
 
       safeAck(ack, ok({ joined: true }))
     } catch (e: any) {
-      try {
-        socket.disconnect(true)
-      } catch {}
       safeAck(ack, err(e?.message ?? 'Join denied', 'UNAUTHORIZED'))
     }
   })

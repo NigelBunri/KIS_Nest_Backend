@@ -86,6 +86,7 @@ export const EVT = {
 
   RECEIPT: 'chat.receipt',
   MESSAGE_RECEIPT: 'chat.message_receipt',
+  MAIN_TAB_BADGES_UPDATED: 'main_tab_badges.updated',
 
   // typing
   TYPING: 'chat.typing',
@@ -189,6 +190,7 @@ export interface SendMessagePayload {
   kind: MessageKind
 
   text?: string
+  previewText?: string
   styledText?: StyledTextPayload
   attachments?: AttachmentPayload[]
   voice?: VoicePayload

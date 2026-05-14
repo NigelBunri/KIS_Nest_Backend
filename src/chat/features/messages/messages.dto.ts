@@ -131,6 +131,9 @@ export class SendMessageDto {
   text?: string;
 
   @IsOptional() @IsString()
+  previewText?: string;
+
+  @IsOptional() @IsString()
   ciphertext?: string;
 
   @IsOptional() @IsObject()

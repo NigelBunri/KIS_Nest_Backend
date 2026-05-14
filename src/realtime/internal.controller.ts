@@ -9,6 +9,14 @@ type ConversationCreatedPayload = {
   userIds: string[]
 }
 
+type MainTabBadgesUpdatedPayload = {
+  event?: string
+  userIds: string[]
+  source?: string
+  reason?: string
+  extra?: Record<string, unknown>
+}
+
 @Controller('internal')
 @UseGuards(InternalAuthGuard)
 export class RealtimeInternalController {
@@ -35,5 +43,36 @@ export class RealtimeInternalController {
     }
 
     return { ok: true }
+  }
+
+  @Post('main-tab-badges/updated')
+  handleMainTabBadgesUpdated(@Body() payload: MainTabBadgesUpdatedPayload) {
+    const userIds = Array.isArray(payload?.userIds) ? payload.userIds : []
+    const cleanUserIds = Array.from(
+      new Set(userIds.map((value) => String(value || '').trim()).filter(Boolean)),
+    )
+    if (cleanUserIds.length === 0) {
+      return { ok: false }
+    }
+
+    const event = 'main_tab_badges.updated'
+    const body = {
+      event,
+      source: String(payload?.source || 'unknown'),
+      reason: String(payload?.reason || ''),
+      extra: payload?.extra || {},
+      at: new Date().toISOString(),
+    }
+
+    for (const userId of cleanUserIds) {
+      try {
+        this.gateway.server?.to(rooms.userRoom(userId)).emit(event, {
+          ...body,
+          userId,
+        })
+      } catch {}
+    }
+
+    return { ok: true, emitted: cleanUserIds.length }
   }
 }

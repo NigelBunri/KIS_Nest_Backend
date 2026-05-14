@@ -72,6 +72,14 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
               new Date().toISOString(),
           })
         }
+        safeEmit(server, rooms.userRoom(principal.userId), EVT.MAIN_TAB_BADGES_UPDATED, {
+          event: EVT.MAIN_TAB_BADGES_UPDATED,
+          source: 'messages',
+          reason: 'read_receipt',
+          conversationId,
+          userId: principal.userId,
+          at: new Date().toISOString(),
+        })
       }
 
       const receiptConvId = (receiptEvent as any)?.conversationId

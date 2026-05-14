@@ -21,15 +21,18 @@ export function internalSignaturesRequired() {
   return String(process.env.NODE_ENV ?? '').toLowerCase() === 'production';
 }
 
-function stableStringify(value: unknown): string {
+function stableStringify(value: unknown, parseJsonString = false): string {
   if (value === null || value === undefined) return '';
-  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  if (Buffer.isBuffer(value)) return stableStringify(value.toString('utf8'), true);
   if (typeof value === 'string') {
-    try {
-      return stableStringify(JSON.parse(value));
-    } catch {
-      return value;
+    if (parseJsonString) {
+      try {
+        return stableStringify(JSON.parse(value));
+      } catch {
+        return value;
+      }
     }
+    return JSON.stringify(value);
   }
   if (Array.isArray(value))
     return `[${value.map((item) => stableStringify(item)).join(',')}]`;
@@ -47,7 +50,7 @@ function stableStringify(value: unknown): string {
 function bodyHash(body: unknown) {
   return crypto
     .createHash('sha256')
-    .update(stableStringify(body))
+    .update(stableStringify(body, typeof body === 'string'))
     .digest('hex');
 }
 
@@ -140,7 +143,6 @@ export function verifyInternalSignature(args: {
   if (nonceCache.has(nonce)) {
     return { ok: false, reason: 'replayed_nonce' };
   }
-  nonceCache.set(nonce, now + skew * 1000);
 
   const payload = signaturePayload({
     method: args.method,
@@ -153,9 +155,9 @@ export function verifyInternalSignature(args: {
   const valid =
     expected.length === signature.length &&
     crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-  return valid
-    ? { ok: true, reason: 'ok' }
-    : { ok: false, reason: 'signature_mismatch' };
+  if (!valid) return { ok: false, reason: 'signature_mismatch' };
+  nonceCache.set(nonce, now + skew * 1000);
+  return { ok: true, reason: 'ok' };
 }
 
 function firstHeader(value: string | string[] | undefined) {
