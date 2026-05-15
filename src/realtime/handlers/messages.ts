@@ -19,6 +19,46 @@ import { E2eeKeysService } from '../../chat/features/e2ee/e2ee-keys.service'
 
 const logger = new Logger('ChatMessagesHandler')
 
+const USER_SAFE_REVIEW_MESSAGE =
+  'This media cannot be sent until it passes KIS family-safety checks.'
+
+function attachmentNeedsSafetyReview(attachment: any): boolean {
+  if (!attachment || typeof attachment !== 'object') return false
+  const safety = attachment.safety && typeof attachment.safety === 'object' ? attachment.safety : {}
+  const status = String(
+    attachment.scanStatus ??
+      attachment.scan_status ??
+      safety.status ??
+      '',
+  ).trim().toLowerCase()
+  return Boolean(
+    attachment.quarantined ||
+      attachment.requiresReview ||
+      attachment.requires_review ||
+      safety.quarantined ||
+      safety.requiresReview ||
+      ['pending_review', 'blocked', 'failed'].includes(status) ||
+      (attachment.kind && !attachment.url && !attachment.downloadUrl),
+  )
+}
+
+function assertSafeMessageMedia(payload: SendMessagePayload) {
+  const attachments = Array.isArray((payload as any)?.attachments)
+    ? (payload as any).attachments
+    : []
+  const unsafe = attachments.find(attachmentNeedsSafetyReview)
+  if (unsafe) {
+    logger.warn('[messages] blocked unsafe or unreviewed media attachment', {
+      conversationId: payload?.conversationId,
+      clientId: payload?.clientId,
+      attachmentId: unsafe?.id,
+      scanStatus: unsafe?.scanStatus ?? unsafe?.safety?.status,
+      quarantined: unsafe?.quarantined ?? unsafe?.safety?.quarantined,
+    })
+    throw new Error(USER_SAFE_REVIEW_MESSAGE)
+  }
+}
+
 export interface MessagesDeps {
   rateLimitService: {
     assert(principal: SocketPrincipal, key: string, limit?: number): Promise<void> | void
@@ -134,6 +174,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       await deps.rateLimitService.assert(principal, `send:${conversationId}`, 50)
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
+      assertSafeMessageMedia(payload)
 
       logger.log('[messages] perms result', perms)
 
@@ -227,6 +268,18 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
           if (listMembers) {
             const memberIds = await listMembers(conversationId)
             for (const userId of memberIds) {
+              safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, {
+                event: EVT.CONVERSATION_UPDATED,
+                reason: 'message_created',
+                conversationId,
+                messageId: created.id,
+                senderId: principal.userId,
+                preview: createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
+                  ? 'Encrypted message'
+                  : (createdDto?.text ?? payload?.text)),
+                lastMessageAt: created.createdAt.toISOString(),
+                seq: created.seq,
+              })
               safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
                 event: EVT.MAIN_TAB_BADGES_UPDATED,
                 source: 'messages',

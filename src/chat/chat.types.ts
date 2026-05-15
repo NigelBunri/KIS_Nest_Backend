@@ -86,6 +86,7 @@ export const EVT = {
 
   RECEIPT: 'chat.receipt',
   MESSAGE_RECEIPT: 'chat.message_receipt',
+  CONVERSATION_UPDATED: 'conversation.updated',
   MAIN_TAB_BADGES_UPDATED: 'main_tab_badges.updated',
 
   // typing
