@@ -93,4 +93,69 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
       safeAck(ack, err(e?.message ?? 'Receipt failed', 'ERROR'))
     }
   })
+
+  socket.on('chat.mark_read_batch', async (payload: { conversationId: string; messageIds: string[] }, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const { conversationId, messageIds } = payload || ({} as any)
+
+    if (!conversationId || !Array.isArray(messageIds) || messageIds.length === 0) {
+      return safeAck(ack, err('conversationId and messageIds[] are required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService.assert(principal, `receipt:${conversationId}`, 200)
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (deps.moderationService) {
+        await deps.moderationService.assertAllowed({
+          conversationId,
+          userId: principal.userId,
+          action: 'receipt',
+        })
+      }
+
+      let lastReceiptEvent: any = null
+
+      for (const messageId of messageIds) {
+        const receiptEvent = await deps.receiptsService.applyReceipt({
+          userId: principal.userId,
+          conversationId,
+          messageId,
+          type: 'read',
+          deviceId: principal.deviceId,
+        })
+
+        if (deps.djangoConversationClient.updateReadState) {
+          const seq = Number((receiptEvent as any)?.seq)
+          if (Number.isFinite(seq) && seq > 0) {
+            await deps.djangoConversationClient.updateReadState({
+              conversationId,
+              userId: principal.userId,
+              lastReadSeq: seq,
+              lastReadAt:
+                (receiptEvent as any)?.updatedAt ??
+                (receiptEvent as any)?.createdAt ??
+                new Date().toISOString(),
+            })
+          }
+        }
+
+        safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, receiptEvent)
+        lastReceiptEvent = receiptEvent
+      }
+
+      // Emit a single badge update at the end (not one per message)
+      safeEmit(server, rooms.userRoom(principal.userId), EVT.MAIN_TAB_BADGES_UPDATED, {
+        event: EVT.MAIN_TAB_BADGES_UPDATED,
+        source: 'messages',
+        reason: 'read_receipt',
+        conversationId,
+        userId: principal.userId,
+        at: new Date().toISOString(),
+      })
+
+      safeAck(ack, ok({ receipt: true, count: messageIds.length }))
+    } catch (e: any) {
+      safeAck(ack, err(e?.message ?? 'Batch receipt failed', 'ERROR'))
+    }
+  })
 }

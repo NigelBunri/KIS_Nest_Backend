@@ -1,16 +1,33 @@
 // src/chat/infra/rate-limit/rate-limit.service.ts
 
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common'
+import { Injectable, HttpException, HttpStatus, OnModuleInit, OnModuleDestroy } from '@nestjs/common'
 import Redis from 'ioredis'
 import type { SocketPrincipal } from '../../chat.types'
 
 type Bucket = { resetAt: number; count: number }
 
+const BUCKET_CLEANUP_INTERVAL_MS = 60_000
+
 @Injectable()
-export class RateLimitService {
+export class RateLimitService implements OnModuleInit, OnModuleDestroy {
   private buckets = new Map<string, Bucket>()
   private redis?: Redis
   private redisReady = false
+  private cleanupTimer?: ReturnType<typeof setInterval>
+
+  onModuleInit() {
+    this.cleanupTimer = setInterval(() => {
+      const now = Date.now()
+      for (const [key, bucket] of this.buckets) {
+        if (now >= bucket.resetAt) this.buckets.delete(key)
+      }
+    }, BUCKET_CLEANUP_INTERVAL_MS)
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    this.redis?.disconnect()
+  }
 
   private getRedis(): Redis | undefined {
     if (this.redisReady) return this.redis

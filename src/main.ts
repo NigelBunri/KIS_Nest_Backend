@@ -6,6 +6,19 @@ import * as dotenvExpand from 'dotenv-expand';
 // ✅ Load .env and expand variables like ${ORIGINS_SERVER}
 dotenvExpand.expand(dotenv.config());
 
+// Sentry must be initialised before any other imports so it can instrument them
+const _sentryDsn = (process.env.SENTRY_DSN ?? '').trim();
+if (_sentryDsn) {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Sentry = require('@sentry/node');
+  Sentry.init({
+    dsn: _sentryDsn,
+    tracesSampleRate: parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE ?? '0.1'),
+    environment: process.env.NODE_ENV ?? 'development',
+    sendDefaultPii: false,
+  });
+}
+
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
@@ -16,10 +29,12 @@ import { ValidationPipe } from '@nestjs/common';
 import { join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import fastifyCors from '@fastify/cors';
+import fastifyHelmet from '@fastify/helmet';
 import fastifyStatic from '@fastify/static';
 import fastifyMultipart from '@fastify/multipart';
 
 import { requestIdMiddleware } from './observability/request-id.middleware';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import {
   configuredOrigins,
   fastifyCorsOriginDelegate,
@@ -98,6 +113,21 @@ async function bootstrap() {
     credentials: true,
   });
 
+  await app.register(fastifyHelmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+        connectSrc: ["'self'"],
+        frameSrc: ["'none'"],
+        objectSrc: ["'none'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  });
+
   await app.register(fastifyMultipart, {
     limits: { fileSize: 50 * 1024 * 1024 },
   });
@@ -123,6 +153,8 @@ async function bootstrap() {
     prefix: '/',
     index: ['index.html'],
   });
+
+  app.useGlobalFilters(new AllExceptionsFilter());
 
   app.useGlobalPipes(
     new ValidationPipe({

@@ -58,6 +58,7 @@ import { FeedsModule } from './feeds.module';
           maxPoolSize: 10,
           autoIndex: env !== 'production',
           appName: 'kis-backend',
+          writeConcern: { w: 'majority', journal: true },
         };
       },
     }),

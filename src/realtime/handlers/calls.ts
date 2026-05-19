@@ -6,6 +6,7 @@ import type { Server, Socket } from 'socket.io'
 import { EVT, rooms, type Ack, type SocketPrincipal } from '../../chat/chat.types'
 import { getPrincipal, ok, err, safeAck, safeEmit } from './utils'
 import type { RoomsDeps } from './rooms'
+import { validateSocketPayload, CallOfferDto, CallSignalDto } from '../socket-dto'
 
 const logger = new Logger('ChatCallHandlers')
 
@@ -67,10 +68,16 @@ function createCallHandler(
 ) {
   return async (payload: CallSignalPayload, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
-    const conversationId = payload?.conversationId
 
+    const DtoClass = event === EVT.CALL_OFFER ? CallOfferDto : CallSignalDto
+    const validation = await validateSocketPayload(DtoClass, payload)
+    if (!validation.ok) {
+      return safeAck(ack, err(validation.errors.join('; '), 'BAD_REQUEST'))
+    }
+
+    const conversationId = payload?.conversationId
     if (!conversationId) {
-      return safeAck(ack, err('conversationId is required', 'BAD_REQUEST'))
+      return safeAck(ack, err('conversationId required', 'BAD_REQUEST'))
     }
 
     try {

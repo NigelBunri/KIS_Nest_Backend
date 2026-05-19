@@ -16,6 +16,13 @@ import {
 } from '../../chat/chat.types'
 import { getPrincipal, ok, err, safeAck, safeEmit } from './utils'
 import { E2eeKeysService } from '../../chat/features/e2ee/e2ee-keys.service'
+import {
+  validateSocketPayload,
+  SendMessageDto,
+  EditMessageDto,
+  DeleteMessageDto,
+  HistoryDto,
+} from '../socket-dto'
 
 const logger = new Logger('ChatMessagesHandler')
 
@@ -147,12 +154,13 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
   socket.on(EVT.SEND, async (payload: SendMessagePayload, ack?: (a: Ack<{ ack: SendMessageAck }>) => void) => {
     const principal = getPrincipal(socket)
 
+    const validation = await validateSocketPayload(SendMessageDto, payload)
+    if (!validation.ok) {
+      return safeAck(ack, err(validation.errors.join('; '), 'BAD_REQUEST'))
+    }
+
     const conversationId = payload?.conversationId
     const clientId = payload?.clientId
-
-    if (!conversationId || !clientId) {
-      return safeAck(ack, err('conversationId and clientId are required', 'BAD_REQUEST'))
-    }
 
     const textPreview =
       typeof payload?.text === 'string' ? payload.text.slice(0, 120) : undefined
@@ -240,72 +248,67 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       socket.emit(EVT.MESSAGE, createdDto)
       safeAck(ack, ok({ ack: ackPayload }))
 
-      void (async () => {
-        try {
-          const preview = createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
-            ? 'Encrypted message'
-            : (createdDto?.text ?? payload?.text))
-          await deps.djangoConversationClient.updateLastMessage({
-            conversationId,
-            createdAt: created.createdAt,
-            preview,
-          })
-        } catch {}
+      const _postSendSideEffects = async () => {
+        const preview = createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
+          ? 'Encrypted message'
+          : (createdDto?.text ?? payload?.text))
 
-        try {
-          await deps.djangoConversationClient.dispatchWebhook({
-            conversationId,
-            event: 'message.created',
-            payload: {
+        await deps.djangoConversationClient.updateLastMessage({
+          conversationId,
+          createdAt: created.createdAt,
+          preview,
+        }).catch((e: any) => logger.warn('[messages] updateLastMessage failed', e?.message))
+
+        await deps.djangoConversationClient.dispatchWebhook({
+          conversationId,
+          event: 'message.created',
+          payload: { messageId: created.id, senderId: principal.userId },
+        }).catch((e: any) => logger.warn('[messages] dispatchWebhook failed', e?.message))
+
+        const listMembers = deps.djangoConversationClient.listMemberIds
+        if (listMembers) {
+          const memberIds = await listMembers(conversationId).catch((e: any) => {
+            logger.warn('[messages] listMemberIds failed', e?.message)
+            return [] as string[]
+          })
+          for (const userId of memberIds) {
+            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, {
+              event: EVT.CONVERSATION_UPDATED,
+              reason: 'message_created',
+              conversationId,
               messageId: created.id,
               senderId: principal.userId,
-            },
-          })
-        } catch {}
-
-        try {
-          const listMembers = deps.djangoConversationClient.listMemberIds
-          if (listMembers) {
-            const memberIds = await listMembers(conversationId)
-            for (const userId of memberIds) {
-              safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, {
-                event: EVT.CONVERSATION_UPDATED,
-                reason: 'message_created',
-                conversationId,
-                messageId: created.id,
-                senderId: principal.userId,
-                preview: createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
-                  ? 'Encrypted message'
-                  : (createdDto?.text ?? payload?.text)),
-                lastMessageAt: created.createdAt.toISOString(),
-                seq: created.seq,
-              })
-              safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
-                event: EVT.MAIN_TAB_BADGES_UPDATED,
-                source: 'messages',
-                reason: 'message_created',
-                conversationId,
-                userId: String(userId),
-                at: new Date().toISOString(),
-              })
-              if (!deps.notificationsService) continue
-              if (String(userId) === String(principal.userId)) continue
-              const isOnline = await deps.presenceService?.isOnline?.(String(userId))
-              if (isOnline) continue
-              await deps.notificationsService.notifyNewMessage({
-                toUserId: String(userId),
-                conversationId,
-                messageId: created.id,
-                preview: createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
-                  ? 'Encrypted message'
-                  : (createdDto?.text ?? payload?.text)),
-                senderName: principal.username ?? undefined,
-                senderId: principal.userId,
-              })
-            }
+              preview,
+              lastMessageAt: created.createdAt.toISOString(),
+              seq: created.seq,
+            })
+            safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
+              event: EVT.MAIN_TAB_BADGES_UPDATED,
+              source: 'messages',
+              reason: 'message_created',
+              conversationId,
+              userId: String(userId),
+              at: new Date().toISOString(),
+            })
+            if (!deps.notificationsService) continue
+            if (String(userId) === String(principal.userId)) continue
+            const isOnline = await deps.presenceService?.isOnline?.(String(userId))
+            if (isOnline) continue
+            await deps.notificationsService.notifyNewMessage({
+              toUserId: String(userId),
+              conversationId,
+              messageId: created.id,
+              preview,
+              senderName: principal.username ?? undefined,
+              senderId: principal.userId,
+            }).catch((e: any) => logger.warn('[messages] notifyNewMessage failed', e?.message))
           }
-        } catch {}
-      })()
+        }
+      }
+
+      _postSendSideEffects().catch((e: any) =>
+        logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
+      )
     } catch (e: any) {
       logger.error(
         `[messages] send failed conversationId=${conversationId} userId=${principal?.userId}`,
@@ -317,12 +320,14 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
   socket.on(EVT.EDIT, async (payload: EditMessagePayload, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
+
+    const validation = await validateSocketPayload(EditMessageDto, payload)
+    if (!validation.ok) {
+      return safeAck(ack, err(validation.errors.join('; '), 'BAD_REQUEST'))
+    }
+
     const conversationId = payload?.conversationId
     const messageId = payload?.messageId
-
-    if (!conversationId || !messageId) {
-      return safeAck(ack, err('conversationId and messageId are required', 'BAD_REQUEST'))
-    }
 
     try {
       await deps.rateLimitService.assert(principal, `edit:${conversationId}`, 60)
@@ -385,12 +390,14 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
   socket.on(EVT.DELETE, async (payload: { conversationId: string; messageId: string }, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
+
+    const validation = await validateSocketPayload(DeleteMessageDto, payload)
+    if (!validation.ok) {
+      return safeAck(ack, err(validation.errors.join('; '), 'BAD_REQUEST'))
+    }
+
     const conversationId = payload?.conversationId
     const messageId = payload?.messageId
-
-    if (!conversationId || !messageId) {
-      return safeAck(ack, err('conversationId and messageId are required', 'BAD_REQUEST'))
-    }
 
     try {
       await deps.rateLimitService.assert(principal, `delete:${conversationId}`, 60)
@@ -446,11 +453,13 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
   socket.on(EVT.HISTORY, async (payload: HistoryPayload, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
-    const conversationId = payload?.conversationId
 
-    if (!conversationId) {
-      return safeAck(ack, err('conversationId is required', 'BAD_REQUEST'))
+    const validation = await validateSocketPayload(HistoryDto, payload)
+    if (!validation.ok) {
+      return safeAck(ack, err(validation.errors.join('; '), 'BAD_REQUEST'))
     }
+
+    const conversationId = payload?.conversationId
 
     try {
       await deps.rateLimitService.assert(principal, `history:${conversationId}`, 30)

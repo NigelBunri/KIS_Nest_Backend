@@ -26,6 +26,8 @@ import { CallsService } from '../chat/features/calls/calls.service';
 import { ModerationService } from '../chat/features/moderation/moderation.service';
 import { PresenceService } from '../chat/features/presence/presence.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PinsService } from '../chat/features/pins/pins.service';
+import { StarsService } from '../chat/features/stars/stars.service';
 import { registerRealtimeHandlers } from './handlers';
 import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
@@ -55,6 +57,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly notificationsService: NotificationsService,
     private readonly authService: DjangoAuthService,
     private readonly e2eeKeysService: E2eeKeysService,
+    private readonly pinsService: PinsService,
+    private readonly starsService: StarsService,
   ) {}
 
   async handleConnection(@ConnectedSocket() socket: Socket) {
@@ -93,15 +97,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       (socket as any).principal = { ...principal, token, deviceId };
     }
 
-    // --- Attach a debug "onAny" BEFORE registering handlers
-    // This proves whether the server receives chat.send at all.
-    socket.onAny((event, ...args) => {
-      const p = (socket as any).principal as SocketPrincipal | undefined;
-      this.logger.log(
-        `[WS] onAny event=${String(event)} socketId=${socket.id} userId=${p?.userId ?? '-'} argsLen=${args.length}`,
-      );
-    });
-
     // --- Join user room
     socket.join(rooms.userRoom(principal.userId));
 
@@ -119,13 +114,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       notificationsService: this.notificationsService,
       presenceService: this.presenceService,
       e2eeKeysService: this.e2eeKeysService,
+      pinsService: this.pinsService,
+      starsService: this.starsService,
     });
 
     // --- Emit readiness
     socket.emit('chat.ready', { ok: true });
 
-    // --- Presence (do not await)
-    void this.presenceService.markOnline(principal.userId);
+    // --- Presence (fire-and-forget, log failures)
+    this.presenceService.markOnline(principal.userId).catch((e: any) =>
+      this.logger.warn(`[WS] markOnline failed userId=${principal.userId}`, e?.message),
+    );
 
     this.logger.log(
       `[WS] connected socketId=${socket.id} userId=${principal.userId} deviceId=${principal.deviceId ?? '-'} ip=${socket.handshake.address ?? '-'} transport=${socket.conn.transport.name}`,
