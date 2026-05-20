@@ -14,6 +14,8 @@ export type CallParticipantStatus =
 
 export type CallSignalKind = 'offer' | 'answer' | 'ice' | 'renegotiate' | 'hangup';
 
+export type CallParticipantRole = 'host' | 'co-host' | 'speaker' | 'audience';
+
 @Schema({ _id: false })
 export class CallParticipant {
   @Prop({ type: String, required: true })
@@ -21,6 +23,9 @@ export class CallParticipant {
 
   @Prop({ type: String, required: true, enum: ['invited', 'connecting', 'joined', 'left', 'rejected', 'busy'] })
   status!: CallParticipantStatus;
+
+  @Prop({ type: String, default: null, enum: ['host', 'co-host', 'speaker', 'audience', null] })
+  role!: CallParticipantRole | null;
 
   @Prop({ type: Date, default: null })
   invitedAt!: Date | null;
@@ -74,9 +79,17 @@ export class CallSession {
   @Prop({ type: Date, default: null, index: true })
   endedAt!: Date | null;
 
-  // Optional: "voice" | "video" (or whatever your clients send)
+  // Legacy 2-value field kept for backwards compat
   @Prop({ type: String, default: 'voice' })
   media!: string;
+
+  // Full 5-type call classification
+  @Prop({ type: String, default: 'voice', enum: ['voice', 'video', 'voice-group', 'video-group', 'broadcast'], index: true })
+  callType!: string;
+
+  // Broadcast live viewer count (non-participant viewers)
+  @Prop({ type: Number, default: 0 })
+  viewerCount!: number;
 
   // participants snapshot (small arrays, bounded)
   @Prop({ type: [Object], default: [] })

@@ -15,6 +15,7 @@ type UpsertCallArgs = {
   conversationId: string
   callId: string
   createdBy: string
+  callType?: string
   media?: string
   inviteeUserIds?: string[]
 }
@@ -42,6 +43,7 @@ export class CallsService {
           conversationId: args.conversationId,
           callId: String(s.callId),
           createdBy: String(s.createdBy),
+          callType: s.callType ? String(s.callType) : undefined,
           media: s.media ? String(s.media) : undefined,
           inviteeUserIds: Array.isArray(s.inviteeUserIds) ? s.inviteeUserIds.map(String) : undefined,
         })
@@ -102,17 +104,28 @@ export class CallsService {
       .lean()
 
     return {
-      calls: rows.map((r: any) => ({
-        id: String(r._id),
-        conversationId: r.conversationId,
-        callId: r.callId,
-        createdBy: r.createdBy,
-        status: r.status,
-        media: r.media,
-        startedAt: r.startedAt?.toISOString?.() ?? String(r.startedAt),
-        endedAt: r.endedAt?.toISOString?.() ?? (r.endedAt ? String(r.endedAt) : null),
-        participants: Array.isArray(r.participants) ? r.participants : [],
-      })),
+      calls: rows.map((r: any) => {
+        const startMs = r.startedAt instanceof Date ? r.startedAt.getTime() : new Date(r.startedAt).getTime()
+        const endMs = r.endedAt instanceof Date ? r.endedAt.getTime() : (r.endedAt ? new Date(r.endedAt).getTime() : null)
+        const durationSeconds = endMs != null && !Number.isNaN(startMs) && !Number.isNaN(endMs)
+          ? Math.max(0, Math.round((endMs - startMs) / 1000))
+          : null
+        const participants = Array.isArray(r.participants) ? r.participants : []
+        return {
+          id: String(r._id),
+          conversationId: r.conversationId,
+          callId: r.callId,
+          createdBy: r.createdBy,
+          status: r.status,
+          callType: r.callType ?? r.media ?? 'voice',
+          media: r.media,
+          startedAt: r.startedAt?.toISOString?.() ?? String(r.startedAt),
+          endedAt: r.endedAt?.toISOString?.() ?? (r.endedAt ? String(r.endedAt) : null),
+          duration: durationSeconds,
+          participantCount: participants.length,
+          participants,
+        }
+      }),
     }
   }
 
@@ -124,6 +137,7 @@ export class CallsService {
     participants.push({
       userId: args.createdBy,
       status: 'connecting',
+      role: 'host',
       invitedAt: now,
       joinedAt: null,
       leftAt: null,
@@ -136,6 +150,7 @@ export class CallsService {
         participants.push({
           userId: uid,
           status: 'invited',
+          role: null,
           invitedAt: now,
           joinedAt: null,
           leftAt: null,
@@ -144,6 +159,9 @@ export class CallsService {
       }
     }
 
+    const callType = args.callType ?? args.media ?? 'voice'
+    const legacyMedia = callType.startsWith('video') ? 'video' : 'voice'
+
     const doc = await this.calls.create({
       conversationId: args.conversationId,
       callId: args.callId,
@@ -151,7 +169,9 @@ export class CallsService {
       status: 'ringing',
       startedAt: now,
       endedAt: null,
-      media: args.media ?? 'voice',
+      callType,
+      media: args.media ?? legacyMedia,
+      viewerCount: 0,
       participants,
       signals: [],
       isActiveInConversation: true,
@@ -196,6 +216,7 @@ export class CallsService {
             participants: {
               userId,
               status,
+              role: null,
               invitedAt: now,
               joinedAt: status === 'joined' ? now : null,
               leftAt: status === 'left' || status === 'rejected' || status === 'busy' ? now : null,
@@ -274,6 +295,32 @@ export class CallsService {
     await this.setParticipantStatus(conversationId, callId, endedByUserId, 'left', reason)
 
     return this.calls.findOne({ conversationId, callId }).lean()
+  }
+
+  async getCallCreator(conversationId: string, callId: string): Promise<string | null> {
+    const call = await this.calls.findOne({ conversationId, callId }, { createdBy: 1 }).lean()
+    return call?.createdBy ?? null
+  }
+
+  async setParticipantRole(
+    conversationId: string,
+    callId: string,
+    userId: string,
+    role: 'host' | 'co-host' | 'speaker' | 'audience',
+  ): Promise<void> {
+    await this.calls.updateOne(
+      { conversationId, callId, 'participants.userId': userId },
+      { $set: { 'participants.$.role': role } },
+    )
+  }
+
+  async bumpViewerCount(conversationId: string, callId: string, delta: 1 | -1): Promise<number> {
+    const result = await this.calls.findOneAndUpdate(
+      { conversationId, callId, isActiveInConversation: true },
+      { $inc: { viewerCount: delta } },
+      { new: true, projection: { viewerCount: 1 } },
+    ).lean()
+    return Math.max(0, result?.viewerCount ?? 0)
   }
 
   async ensureCallExistsOrThrow(conversationId: string, callId: string): Promise<CallSession> {

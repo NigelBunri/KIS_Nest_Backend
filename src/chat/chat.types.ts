@@ -103,11 +103,34 @@ export const EVT = {
   PIN_SET: 'chat.pin_set',
   STAR_SET: 'chat.star_set',
 
-  // calls (signaling)
+  // calls — legacy signaling (1:1, keep for backwards compat)
   CALL_OFFER: 'call.offer',
   CALL_ANSWER: 'call.answer',
   CALL_ICE: 'call.ice',
   CALL_END: 'call.end',
+
+  // calls — WebRTC peer-to-peer media negotiation (targeted relay)
+  CALL_SDP_OFFER: 'call.sdp.offer',
+  CALL_SDP_ANSWER: 'call.sdp.answer',
+  CALL_ICE_CANDIDATE: 'call.ice.candidate',
+
+  // calls — participant lifecycle (server → clients)
+  CALL_PARTICIPANT_JOINED: 'call.participant.joined',
+  CALL_PARTICIPANT_LEFT: 'call.participant.left',
+  CALL_PARTICIPANT_MUTED: 'call.participant.muted',
+
+  // calls — group & broadcast features
+  CALL_HAND_RAISE: 'call.hand.raise',
+  CALL_HAND_LOWER: 'call.hand.lower',
+  CALL_REACTION: 'call.reaction',
+  CALL_CHAT_MSG: 'call.chat.message',
+
+  // calls — host controls
+  CALL_PARTICIPANT_MUTE: 'call.participant.mute',
+  CALL_PARTICIPANT_REMOVE: 'call.participant.remove',
+
+  // calls — broadcast stats
+  CALL_VIEWER_COUNT: 'call.viewer.count',
 } as const
 
 export type EventKey = (typeof EVT)[keyof typeof EVT]
