@@ -5,12 +5,12 @@ export type PushMessage = {
 };
 
 export interface PushProvider {
-  send(tokens: string[], msg: PushMessage): Promise<{ delivered: number }>;
+  send(tokens: string[], msg: PushMessage): Promise<{ delivered: number; failedTokens: string[] }>;
 }
 
 // Compile-safe default
 export class DummyPushProvider implements PushProvider {
   async send(tokens: string[], msg: PushMessage) {
-    return { delivered: 0 };
+    return { delivered: 0, failedTokens: [] };
   }
 }

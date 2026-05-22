@@ -150,6 +150,26 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
       }
 
+      // Clean up any active call participations for this user
+      try {
+        const activeCalls = await this.callsService.getActiveCallsForUser(principal.userId);
+        for (const call of activeCalls) {
+          await this.callsService.setParticipantStatus(
+            call.conversationId, call.callId, principal.userId, 'left', 'disconnected',
+          );
+          await this.callsService.endIfNoActiveParticipants(call.conversationId, call.callId);
+          this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_PARTICIPANT_LEFT, {
+            callId: call.callId,
+            conversationId: call.conversationId,
+            userId: principal.userId,
+            reason: 'disconnected',
+            leftAt: new Date().toISOString(),
+          });
+        }
+      } catch (e: any) {
+        this.logger.warn(`[WS] call cleanup failed userId=${principal.userId}`, e?.message);
+      }
+
       this.logger.log(
         `[WS] disconnected socketId=${socket.id} userId=${principal.userId} deviceId=${principal.deviceId ?? '-'} ip=${socket.handshake.address ?? '-'} transport=${socket.conn.transport.name}`,
       );

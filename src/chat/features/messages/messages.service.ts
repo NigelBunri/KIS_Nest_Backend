@@ -43,17 +43,17 @@ export class MessagesService {
 
       kind: input.kind as unknown as MessageKind,
 
-      threadId: (input as any).threadId,
+      threadId: input.threadId,
 
       senderDeviceId,
       text: input.text,
-      ciphertext: (input as any).ciphertext,
-      encryptionMeta: (input as any).encryptionMeta,
-      iv: (input as any).iv,
-      tag: (input as any).tag,
-      aad: (input as any).aad,
-      encryptionVersion: (input as any).encryptionVersion,
-      encryptionKeyVersion: (input as any).encryptionKeyVersion,
+      ciphertext: input.ciphertext,
+      encryptionMeta: input.encryptionMeta,
+      iv: input.iv,
+      tag: input.tag,
+      aad: input.aad,
+      encryptionVersion: input.encryptionVersion,
+      encryptionKeyVersion: input.encryptionKeyVersion,
       styledText: input.styledText,
       voice: input.voice,
       sticker: input.sticker,
@@ -410,13 +410,13 @@ export class MessagesService {
     if (hasEncryptedPayload) return
 
     const hasText = !!(input.text && input.text.trim().length)
-    const hasStyled = !!(input as any).styledText
-    const hasVoice = !!(input as any).voice
-    const hasSticker = !!(input as any).sticker
-    const hasAttachments = !!((input as any).attachments && (input as any).attachments.length)
-    const hasContacts = !!((input as any).contacts && (input as any).contacts.length)
-    const hasPoll = !!(input as any).poll
-    const hasEvent = !!(input as any).event
+    const hasStyled = !!input.styledText
+    const hasVoice = !!input.voice
+    const hasSticker = !!input.sticker
+    const hasAttachments = !!(input.attachments && input.attachments.length)
+    const hasContacts = !!(input.contacts && input.contacts.length)
+    const hasPoll = !!input.poll
+    const hasEvent = !!input.event
 
     switch (kind) {
       case 'text':
@@ -445,37 +445,37 @@ export class MessagesService {
         break
     }
 
-    if (kind !== 'styled_text' && hasStyled) throw new BadRequestException('styledText not allowed for this kind')
-    if (kind !== 'voice' && hasVoice) throw new BadRequestException('voice not allowed for this kind')
-    if (kind !== 'sticker' && hasSticker) throw new BadRequestException('sticker not allowed for this kind')
-    if (kind !== 'contacts' && hasContacts) throw new BadRequestException('contacts not allowed for this kind')
-    if (kind !== 'poll' && hasPoll) throw new BadRequestException('poll not allowed for this kind')
-    if (kind !== 'event' && hasEvent) throw new BadRequestException('event not allowed for this kind')
+    if (kind !== 'styled_text' && hasStyled) throw new BadRequestException('styledText payload only allowed for styled_text kind')
+    if (kind !== 'voice' && hasVoice) throw new BadRequestException('voice payload only allowed for voice kind')
+    if (kind !== 'sticker' && hasSticker) throw new BadRequestException('sticker payload only allowed for sticker kind')
+    if (kind !== 'contacts' && hasContacts) throw new BadRequestException('contacts payload only allowed for contacts kind')
+    if (kind !== 'poll' && hasPoll) throw new BadRequestException('poll payload only allowed for poll kind')
+    if (kind !== 'event' && hasEvent) throw new BadRequestException('event payload only allowed for event kind')
   }
 
   private buildPreview(input: SendMessageDto): string | undefined {
-    const explicitPreview = typeof (input as any).previewText === 'string'
-      ? (input as any).previewText.trim().slice(0, 200)
+    const explicitPreview = typeof input.previewText === 'string'
+      ? input.previewText.trim().slice(0, 200)
       : ''
     if (explicitPreview) return explicitPreview
-    if (!input.text && ((input as any).ciphertext || (input as any).encryptionMeta)) {
+    if (!input.text && (input.ciphertext || input.encryptionMeta)) {
       return 'Encrypted message'
     }
-    switch (input.kind as any) {
+    switch (input.kind) {
       case 'text':
         return input.text?.slice(0, 200)
       case 'styled_text':
-        return (input as any).styledText?.text?.slice(0, 200)
+        return input.styledText?.text?.slice(0, 200)
       case 'voice':
         return '🎤 Voice message'
       case 'sticker':
         return 'Sticker'
       case 'contacts':
-        return `👤 Contact${(((input as any).contacts?.length ?? 0) > 1 ? 's' : '')}`
+        return `👤 Contact${((input.contacts?.length ?? 0) > 1 ? 's' : '')}`
       case 'poll':
-        return `📊 ${(input as any).poll?.question ?? 'Poll'}`
+        return `📊 ${input.poll?.question ?? 'Poll'}`
       case 'event':
-        return `📅 ${(input as any).event?.title ?? 'Event'}`
+        return `📅 ${input.event?.title ?? 'Event'}`
       case 'system':
         return input.text?.slice(0, 200)
       default:

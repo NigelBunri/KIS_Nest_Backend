@@ -154,6 +154,12 @@ export interface AttachmentPayload {
 
 export interface StyledTextPayload {
   text: string
+  // Visual style fields — must match message.schema.ts StyledText and frontend chatTypes.ts
+  backgroundColor?: string
+  fontSize?: number
+  fontColor?: string
+  fontFamily?: string
+  // Inline entity markup (bold/italic/etc.)
   entities?: Array<{
     type: 'bold' | 'italic' | 'underline' | 'code' | 'link'
     offset: number

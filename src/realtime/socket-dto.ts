@@ -65,6 +65,35 @@ export class SendMessageDto {
   @MaxLength(10_000)
   text?: string;
 
+  // Styled-text visual fields — stored in a sub-document in MongoDB.
+  // Validated loosely; the Mongoose schema enforces required fields.
+  @IsOptional()
+  styledText?: {
+    text: string
+    backgroundColor?: string
+    fontSize?: number
+    fontColor?: string
+    fontFamily?: string
+  };
+
+  @IsOptional()
+  voice?: unknown;
+
+  @IsOptional()
+  sticker?: unknown;
+
+  @IsOptional()
+  contacts?: unknown[];
+
+  @IsOptional()
+  poll?: unknown;
+
+  @IsOptional()
+  event?: unknown;
+
+  @IsOptional()
+  replyToId?: string;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20)
@@ -72,6 +101,24 @@ export class SendMessageDto {
 
   @IsOptional()
   encryptionMeta?: unknown;
+
+  @IsOptional()
+  ciphertext?: string;
+
+  @IsOptional()
+  iv?: string;
+
+  @IsOptional()
+  tag?: string;
+
+  @IsOptional()
+  aad?: string;
+
+  @IsOptional()
+  encryptionVersion?: string;
+
+  @IsOptional()
+  encryptionKeyVersion?: string;
 }
 
 export class EditMessageDto {

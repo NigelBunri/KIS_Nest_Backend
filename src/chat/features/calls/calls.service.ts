@@ -1,6 +1,6 @@
 // src/chat/features/calls/calls.service.ts
 
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common'
 import { InjectModel } from '@nestjs/mongoose'
 import { Model } from 'mongoose'
 import {
@@ -21,10 +21,23 @@ type UpsertCallArgs = {
 }
 
 @Injectable()
-export class CallsService {
+export class CallsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CallsService.name)
+  private cleanupTimer?: NodeJS.Timeout
 
   constructor(@InjectModel(CallSession.name) private readonly calls: Model<CallSessionDocument>) {}
+
+  onModuleInit() {
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupStaleCalls().catch((e: any) =>
+        this.logger.warn('[calls] cleanupStaleCalls failed', e?.message),
+      )
+    }, 30_000)
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+  }
 
   /**
    * ✅ Required by realtime handlers (optional dep):
@@ -345,6 +358,59 @@ export class CallsService {
         { conversationId, callId },
         { $set: { status: 'ended', endedAt: new Date(), isActiveInConversation: false } },
       )
+    }
+  }
+
+  async getActiveCallsForUser(userId: string): Promise<CallSession[]> {
+    return this.calls
+      .find({
+        isActiveInConversation: true,
+        participants: { $elemMatch: { userId, status: 'joined' } },
+      })
+      .lean()
+  }
+
+  async getParticipantsSnapshot(conversationId: string, callId: string): Promise<CallSession['participants']> {
+    const call = await this.calls.findOne({ conversationId, callId }, { participants: 1 }).lean()
+    return call?.participants ?? []
+  }
+
+  async cleanupStaleCalls(): Promise<void> {
+    const now = new Date()
+    const ringingCutoff = new Date(now.getTime() - 90_000)   // ringing > 90 s
+    const activeCutoff = new Date(now.getTime() - 120_000)   // active but all left > 120 s
+
+    // End calls stuck in ringing with no answer
+    const staleRinging = await this.calls
+      .find({ status: 'ringing', startedAt: { $lt: ringingCutoff }, isActiveInConversation: true })
+      .lean()
+    for (const call of staleRinging) {
+      await this.calls.updateOne(
+        { conversationId: call.conversationId, callId: call.callId },
+        { $set: { status: 'missed', endedAt: now, isActiveInConversation: false } },
+      )
+      this.logger.log(`[calls] cleanup: ringing timeout callId=${call.callId}`)
+    }
+
+    // End active calls where all participants have left
+    const staleActive = await this.calls
+      .find({
+        status: 'active',
+        isActiveInConversation: true,
+        startedAt: { $lt: activeCutoff },
+      })
+      .lean()
+    for (const call of staleActive) {
+      const anyStillIn = call.participants.some(
+        (p) => p.status === 'joined' || p.status === 'connecting',
+      )
+      if (!anyStillIn) {
+        await this.calls.updateOne(
+          { conversationId: call.conversationId, callId: call.callId },
+          { $set: { status: 'ended', endedAt: now, isActiveInConversation: false } },
+        )
+        this.logger.log(`[calls] cleanup: no-participant timeout callId=${call.callId}`)
+      }
     }
   }
 }

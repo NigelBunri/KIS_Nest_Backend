@@ -43,7 +43,6 @@ const BLOCKED_EXTENSIONS = new Set([
 const ALLOWED_MIME_PREFIXES = ['image/', 'video/', 'audio/', 'text/'];
 const ALLOWED_MIME_TYPES = new Set([
   'application/json',
-  'application/octet-stream',
   'application/pdf',
   'application/msword',
   'application/vnd.ms-excel',
@@ -54,6 +53,40 @@ const ALLOWED_MIME_TYPES = new Set([
   'application/zip',
 ]);
 
+// Magic-byte signatures: [bytes, offset, allowed_mime_prefixes_or_types]
+const MAGIC_SIGNATURES: Array<{ bytes: number[]; offset?: number; mimes: string[] }> = [
+  { bytes: [0xff, 0xd8, 0xff], mimes: ['image/jpeg'] },
+  { bytes: [0x89, 0x50, 0x4e, 0x47], mimes: ['image/png'] },
+  { bytes: [0x47, 0x49, 0x46, 0x38], mimes: ['image/gif'] },
+  { bytes: [0x52, 0x49, 0x46, 0x46], mimes: ['image/webp', 'audio/wav'] },
+  { bytes: [0x25, 0x50, 0x44, 0x46], mimes: ['application/pdf'] },
+  { bytes: [0x50, 0x4b, 0x03, 0x04], mimes: ['application/zip', 'application/vnd.openxmlformats', 'application/vnd.ms-'] },
+  { bytes: [0x1a, 0x45, 0xdf, 0xa3], mimes: ['video/webm'] },
+  { bytes: [0x66, 0x74, 0x79, 0x70], offset: 4, mimes: ['video/mp4', 'video/quicktime', 'video/'] },
+  { bytes: [0x4f, 0x67, 0x67, 0x53], mimes: ['audio/ogg', 'video/ogg'] },
+  { bytes: [0x49, 0x44, 0x33], mimes: ['audio/mpeg', 'audio/mp3'] },
+  { bytes: [0xff, 0xfb], mimes: ['audio/mpeg', 'audio/mp3'] },
+  { bytes: [0xff, 0xf3], mimes: ['audio/mpeg', 'audio/mp3'] },
+  // Block executables regardless of declared type
+];
+const BLOCKED_MAGIC: number[][] = [
+  [0x4d, 0x5a],             // MZ — Windows PE executable
+  [0x7f, 0x45, 0x4c, 0x46], // ELF — Linux/Unix binary
+];
+
+function detectMagicMime(buf: Buffer): string | null {
+  for (const sig of MAGIC_SIGNATURES) {
+    const off = sig.offset ?? 0
+    const slice = buf.slice(off, off + sig.bytes.length)
+    if (sig.bytes.every((b, i) => slice[i] === b)) return sig.mimes[0]
+  }
+  return null
+}
+
+function hasBlockedMagic(buf: Buffer): boolean {
+  return BLOCKED_MAGIC.some(sig => sig.every((b, i) => buf[i] === b))
+}
+
 const extensionFor = (filename?: string) => {
   const match = String(filename || '')
     .toLowerCase()
@@ -63,11 +96,24 @@ const extensionFor = (filename?: string) => {
 
 const isAllowedMime = (mime?: string) => {
   const normalized = String(mime || '').toLowerCase();
-  if (!normalized) return false;
+  if (!normalized || normalized === 'application/octet-stream') return false;
   return (
     ALLOWED_MIME_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
     ALLOWED_MIME_TYPES.has(normalized)
   );
+};
+
+const mimeMatchesMagic = (declaredMime: string, buf: Buffer): boolean => {
+  if (hasBlockedMagic(buf)) return false
+  const detected = detectMagicMime(buf)
+  if (!detected) return true  // unknown magic — allow, rely on extension+declared
+  const norm = declaredMime.toLowerCase()
+  for (const sig of MAGIC_SIGNATURES) {
+    if (sig.bytes.every((b, i) => (buf.slice(sig.offset ?? 0))[i] === b)) {
+      return sig.mimes.some(m => norm.startsWith(m) || m.startsWith(norm.split('/')[0]))
+    }
+  }
+  return true
 };
 
 const servesUploadsPublicly = () => {
@@ -129,6 +175,14 @@ export class UploadsController {
       mp.file.on('error', reject);
     });
     const buffer = Buffer.concat(chunks);
+
+    // Magic-byte validation: block executables and mismatched MIME declarations
+    if (hasBlockedMagic(buffer)) {
+      throw new BadRequestException('Executable file content is not allowed.');
+    }
+    if (!mimeMatchesMagic(mp.mimetype, buffer)) {
+      throw new BadRequestException('File content does not match declared MIME type.');
+    }
 
     const parseDurationSeconds = () => {
       const query = (req.query ?? {}) as Record<

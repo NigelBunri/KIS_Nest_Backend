@@ -5,7 +5,7 @@ type FirebaseAdmin = {
   initializeApp: (args: any) => any
   credential: { cert: (input: any) => any }
   messaging: () => {
-    sendEachForMulticast: (payload: any) => Promise<{ responses: Array<{ success: boolean }> }>
+    sendEachForMulticast: (payload: any) => Promise<{ responses: Array<{ success: boolean; error?: { code: string } }> }>
   }
 }
 
@@ -52,6 +52,13 @@ function ensureApp(admin: FirebaseAdmin): boolean {
   return true
 }
 
+// Codes that indicate a token is permanently invalid and should be deactivated
+const STALE_ERROR_CODES = new Set([
+  'messaging/invalid-registration-token',
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-argument',
+])
+
 class FcmPushProvider implements PushProvider {
   constructor(private readonly admin: FirebaseAdmin) {}
 
@@ -75,7 +82,11 @@ class FcmPushProvider implements PushProvider {
 
     const res = await this.admin.messaging().sendEachForMulticast(payload)
     const delivered = res.responses.filter((r) => r.success).length
-    return { delivered }
+    const failedTokens = res.responses
+      .map((r, i) => ({ r, token: tokens[i] }))
+      .filter(({ r }) => !r.success && r.error && STALE_ERROR_CODES.has(r.error.code))
+      .map(({ token }) => token)
+    return { delivered, failedTokens }
   }
 }
 

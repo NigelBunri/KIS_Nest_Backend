@@ -76,6 +76,8 @@ export interface CallsDeps {
     bumpViewerCount?(conversationId: string, callId: string, delta: 1 | -1): Promise<number>
     upsertState?(args: { conversationId: string; state: Record<string, unknown> }): Promise<void>
     clearState?(args: { conversationId: string }): Promise<void>
+    getActiveCallsForUser?(userId: string): Promise<any[]>
+    getParticipantsSnapshot?(conversationId: string, callId: string): Promise<any[]>
   }
 }
 
@@ -326,6 +328,57 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
     } catch (error: any) {
       logger.error(`[calls] call.ice.candidate failed userId=${principal?.userId}`, error?.message)
       safeAck(ack, err(error?.message ?? 'ICE relay failed', 'ERROR'))
+    }
+  })
+
+  // call.ice.restart — relay ICE restart signal to target peer
+  socket.on('call.ice.restart', async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    const targetUserId = typeof p.targetUserId === 'string' ? p.targetUserId : null
+    if (!conversationId || !callId || !targetUserId) {
+      return safeAck(ack, err('conversationId, callId, targetUserId required', 'BAD_REQUEST'))
+    }
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:ice:restart', 10)
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      await deps.callsService?.appendSignal?.(conversationId, callId, {
+        kind: 'renegotiate',
+        fromUserId: principal.userId,
+        toUserId: targetUserId,
+        payloadType: 'ice_restart',
+      })
+      safeEmit(server, rooms.userRoom(targetUserId), 'call.ice.restart', {
+        conversationId,
+        callId,
+        fromUserId: principal.userId,
+      })
+      safeAck(ack, ok({ delivered: true }))
+    } catch (error: any) {
+      logger.error(`[calls] call.ice.restart failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'ICE restart relay failed', 'ERROR'))
+    }
+  })
+
+  // call.sync — client requests current participant snapshot after reconnect
+  socket.on('call.sync', async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    if (!conversationId || !callId) {
+      return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
+    }
+    try {
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const participants = await deps.callsService?.getParticipantsSnapshot?.(conversationId, callId) ?? []
+      socket.emit('call.participants.snapshot', { conversationId, callId, participants })
+      safeAck(ack, ok({ participants }))
+    } catch (error: any) {
+      logger.error(`[calls] call.sync failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Sync failed', 'ERROR'))
     }
   })
 }

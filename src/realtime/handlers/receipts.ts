@@ -87,7 +87,16 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
         throw new Error('Conversation mismatch on receipt')
       }
 
-      safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, receiptEvent)
+      // Emit a receipt notification — NOT the full message document.
+      // Frontend onReceipt expects {conversationId, messageId, type} to update
+      // message status (single-tick → double-tick → blue double-tick).
+      safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, {
+        conversationId,
+        messageId,
+        type,
+        userId: principal.userId,
+        at: Date.now(),
+      })
       safeAck(ack, ok({ receipt: true }))
     } catch (e: any) {
       safeAck(ack, err(e?.message ?? 'Receipt failed', 'ERROR'))
@@ -113,7 +122,8 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
         })
       }
 
-      let lastReceiptEvent: any = null
+      let lastSeq = 0
+      let lastReadAt: string | null = null
 
       for (const messageId of messageIds) {
         const receiptEvent = await deps.receiptsService.applyReceipt({
@@ -124,23 +134,34 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
           deviceId: principal.deviceId,
         })
 
-        if (deps.djangoConversationClient.updateReadState) {
-          const seq = Number((receiptEvent as any)?.seq)
-          if (Number.isFinite(seq) && seq > 0) {
-            await deps.djangoConversationClient.updateReadState({
-              conversationId,
-              userId: principal.userId,
-              lastReadSeq: seq,
-              lastReadAt:
-                (receiptEvent as any)?.updatedAt ??
-                (receiptEvent as any)?.createdAt ??
-                new Date().toISOString(),
-            })
+        const seq = Number((receiptEvent as any)?.seq)
+        if (Number.isFinite(seq) && seq > 0) {
+          if (seq > lastSeq) {
+            lastSeq = seq
+            lastReadAt =
+              (receiptEvent as any)?.updatedAt ??
+              (receiptEvent as any)?.createdAt ??
+              new Date().toISOString()
           }
         }
 
-        safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, receiptEvent)
-        lastReceiptEvent = receiptEvent
+        // Emit a receipt notification — NOT the full message document.
+        safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, {
+          conversationId,
+          messageId,
+          type: 'read',
+          userId: principal.userId,
+          at: Date.now(),
+        })
+      }
+
+      if (lastSeq > 0 && deps.djangoConversationClient.updateReadState) {
+        await deps.djangoConversationClient.updateReadState({
+          conversationId,
+          userId: principal.userId,
+          lastReadSeq: lastSeq,
+          lastReadAt: lastReadAt ?? new Date().toISOString(),
+        })
       }
 
       // Emit a single badge update at the end (not one per message)
