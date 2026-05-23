@@ -115,11 +115,14 @@ function createCallHandler(
         deviceId: principal.deviceId ?? null,
       }
 
+      // Collect invitee IDs for CALL_OFFER — needed for routing below
+      const offerInviteeIds: string[] =
+        event === EVT.CALL_OFFER && Array.isArray(payload?.inviteeUserIds)
+          ? payload.inviteeUserIds.map(String).filter((id) => id && id !== principal.userId)
+          : []
+
       if (callId && deps.callsService) {
         if (event === EVT.CALL_OFFER) {
-          const inviteeUserIds = Array.isArray(payload?.inviteeUserIds)
-            ? payload.inviteeUserIds.map(String).filter((id) => id && id !== principal.userId)
-            : []
           const callType = typeof payload?.callType === 'string' ? payload.callType : undefined
           const media = typeof payload?.media === 'string' ? payload.media : undefined
 
@@ -130,7 +133,7 @@ function createCallHandler(
               createdBy: principal.userId,
               callType,
               media,
-              inviteeUserIds,
+              inviteeUserIds: offerInviteeIds,
             })
           } else if (deps.callsService.upsertState) {
             await deps.callsService.upsertState({ conversationId, state: payload as Record<string, unknown> })
@@ -243,6 +246,30 @@ function createCallHandler(
       }
 
       safeEmit(server, rooms.convRoom(conversationId), event, enrichedPayload)
+
+      // call.offer: invitees are typically NOT in the conv room (they have a
+      // different screen open). Deliver directly to their user rooms AND pull
+      // all their sockets into the conv room so subsequent signaling events
+      // (call.answer, ICE, SDP) are received without an extra round-trip.
+      if (event === EVT.CALL_OFFER && offerInviteeIds.length > 0) {
+        for (const uid of offerInviteeIds) {
+          safeEmit(server, rooms.userRoom(uid), EVT.CALL_OFFER, enrichedPayload)
+          server.in(rooms.userRoom(uid)).socketsJoin(rooms.convRoom(conversationId))
+        }
+        // Also ensure the caller's sockets are in the conv room
+        server.in(rooms.userRoom(principal.userId)).socketsJoin(rooms.convRoom(conversationId))
+      }
+
+      // call.answer: make sure the answer reaches the caller even if they
+      // navigated away from the chat while waiting.
+      if (event === EVT.CALL_ANSWER && callId && deps.callsService?.getCallCreator) {
+        const creator = await deps.callsService.getCallCreator(conversationId, callId).catch(() => null)
+        if (creator && creator !== principal.userId) {
+          safeEmit(server, rooms.userRoom(creator), EVT.CALL_ANSWER, enrichedPayload)
+          server.in(rooms.userRoom(creator)).socketsJoin(rooms.convRoom(conversationId))
+        }
+      }
+
       safeAck(ack, ok({ delivered: true }))
     } catch (error: any) {
       logger.error(
@@ -266,7 +293,11 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
     const { conversationId, callId, targetUserId, sdp, sdpType } = v.value
     try {
       await deps.rateLimitService?.assert(principal, 'call:sdp', 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      // Sockets are forced into the conv room when call.offer is processed —
+      // trust that membership rather than hitting Django on every SDP frame.
+      if (!socket.rooms.has(rooms.convRoom(conversationId))) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
 
       safeEmit(server, rooms.userRoom(targetUserId), EVT.CALL_SDP_OFFER, {
         conversationId,
@@ -291,7 +322,9 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
     const { conversationId, callId, targetUserId, sdp } = v.value
     try {
       await deps.rateLimitService?.assert(principal, 'call:sdp', 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (!socket.rooms.has(rooms.convRoom(conversationId))) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
 
       safeEmit(server, rooms.userRoom(targetUserId), EVT.CALL_SDP_ANSWER, {
         conversationId,
@@ -316,7 +349,9 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
     const { conversationId, callId, targetUserId, candidate } = v.value
     try {
       await deps.rateLimitService?.assert(principal, 'call:ice', 300)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (!socket.rooms.has(rooms.convRoom(conversationId))) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
 
       safeEmit(server, rooms.userRoom(targetUserId), EVT.CALL_ICE_CANDIDATE, {
         conversationId,

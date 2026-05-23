@@ -35,11 +35,19 @@ export class DjangoConversationClient {
   constructor(private readonly http: HttpService) {}
   private readonly permsCache = new Map<
     string,
-    { expiresAt: number; data: DjangoWsPermsResponse }
+    { expiresAt: number; staleUntil: number; data: DjangoWsPermsResponse }
   >();
   private readonly permsTtlMs = Number(
-    process.env.DJANGO_CONV_PERMS_TTL_MS ?? 8000,
+    process.env.DJANGO_CONV_PERMS_TTL_MS ?? 120_000,
   );
+  // How long stale entries are kept as a fallback when Django is unreachable
+  private readonly permsStaleTtlMs = this.permsTtlMs * 10;
+
+  private readonly memberIdsCache = new Map<
+    string,
+    { expiresAt: number; ids: string[] }
+  >();
+  private readonly memberIdsTtlMs = 30_000;
 
   /**
    * Fetch conversation-scoped permissions from Django
@@ -66,6 +74,7 @@ export class DjangoConversationClient {
       const perms = this.buildBroadcastPerms();
       this.permsCache.set(cacheKey, {
         expiresAt: now + this.permsTtlMs,
+        staleUntil: now + this.permsStaleTtlMs,
         data: perms,
       });
       return perms;
@@ -101,16 +110,22 @@ export class DjangoConversationClient {
         this.http.get<DjangoWsPermsResponse>(url, {
           headers,
           params: { userId: principal.userId },
+          timeout: 5000,
         }),
       );
 
       const data = res.data;
       this.permsCache.set(cacheKey, {
         expiresAt: now + this.permsTtlMs,
+        staleUntil: now + this.permsStaleTtlMs,
         data,
       });
       return data;
     } catch (err) {
+      // Django is unreachable — serve stale entry rather than blocking the user
+      if (cached && cached.staleUntil > now) {
+        return cached.data;
+      }
       throw new UnauthorizedException('Conversation permission check failed');
     }
   }
@@ -229,6 +244,13 @@ export class DjangoConversationClient {
     if (isBroadcastConversation(conversationId)) {
       return [];
     }
+
+    const now = Date.now();
+    const cached = this.memberIdsCache.get(conversationId);
+    if (cached && cached.expiresAt > now) {
+      return cached.ids;
+    }
+
     const base = this.djangoApiBase();
     const url =
       process.env.DJANGO_CONV_MEMBER_IDS_URL ??
@@ -247,11 +269,14 @@ export class DjangoConversationClient {
             secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
           }),
         },
+        timeout: 5000,
       }),
     );
 
     const data = res?.data ?? {};
-    return (data.user_ids ?? data.userIds ?? []).map((id) => String(id));
+    const ids = (data.user_ids ?? data.userIds ?? []).map((id) => String(id));
+    this.memberIdsCache.set(conversationId, { expiresAt: now + this.memberIdsTtlMs, ids });
+    return ids;
   }
 
   async policyCheck(args: {

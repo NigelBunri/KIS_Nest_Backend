@@ -265,9 +265,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
           payload: { messageId: created.id, senderId: principal.userId },
         }).catch((e: any) => logger.warn('[messages] dispatchWebhook failed', e?.message))
 
-        const listMembers = deps.djangoConversationClient.listMemberIds
-        if (listMembers) {
-          const memberIds = await listMembers(conversationId).catch((e: any) => {
+        // Call via the object to preserve `this` context inside listMemberIds
+        if (deps.djangoConversationClient.listMemberIds) {
+          const memberIds = await deps.djangoConversationClient.listMemberIds(conversationId).catch((e: any) => {
             logger.warn('[messages] listMemberIds failed', e?.message)
             return [] as string[]
           })

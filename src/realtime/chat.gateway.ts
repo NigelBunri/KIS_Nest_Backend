@@ -90,7 +90,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return;
       }
 
-      principal = await this.authService.introspect(token);
+      try {
+        principal = await this.authService.introspect(token);
+      } catch (authErr: any) {
+        this.logger.warn(
+          `[WS] auth rejected socketId=${socket.id} reason=${authErr?.message ?? 'unknown'}`,
+        );
+        socket.emit('auth_error', { message: 'Invalid or expired token' });
+        socket.disconnect(true);
+        return;
+      }
       const deviceId =
         (socket.handshake as any)?.auth?.deviceId ||
         (socket.handshake?.headers as any)?.['x-device-id'];

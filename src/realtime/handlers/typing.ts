@@ -8,9 +8,6 @@ export interface TypingDeps {
   rateLimitService: {
     assert(principal: SocketPrincipal, key: string, limit?: number): Promise<void> | void
   }
-  djangoConversationClient: {
-    assertMember(principal: SocketPrincipal, conversationId: string): Promise<any>
-  }
   moderationService?: {
     assertAllowed(args: { conversationId: string; userId: string; action: 'typing' }): Promise<void> | void
   }
@@ -30,7 +27,14 @@ export function registerTypingHandlers(server: Server, socket: Socket, deps: Typ
 
       try {
         await deps.rateLimitService.assert(principal, `typing:${conversationId}`, 300)
-        await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+        // Membership was already verified when the socket joined the conv room.
+        // Re-calling assertMember on every keystroke would hit Django every 2 min
+        // and stall the indicator whenever Django is slow. Trust room membership.
+        if (!socket.rooms.has(rooms.convRoom(conversationId))) {
+          return safeAck(ack, err('Not in conversation room', 'UNAUTHORIZED'))
+        }
+
         if (deps.moderationService) {
           await deps.moderationService.assertAllowed({
             conversationId,
