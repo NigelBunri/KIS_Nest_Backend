@@ -143,6 +143,37 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createCallOrThrowIfActiveInConversation(args: UpsertCallArgs): Promise<CallSession> {
+    // Idempotent: same callId was already created (reconnect / duplicate emit) — return it.
+    const existingById = await this.calls
+      .findOne({ conversationId: args.conversationId, callId: args.callId })
+      .lean()
+    if (existingById) {
+      this.logger.debug(`[calls] createCall idempotent return callId=${args.callId}`)
+      return existingById as CallSession
+    }
+
+    // If another call is active for this conversation, auto-end it when it is
+    // stale (> 5 min old) — handles the case where call.end was never received
+    // by the server due to a network drop.
+    const staleThresholdMs = 5 * 60 * 1000
+    const existingActive = await this.calls
+      .findOne({ conversationId: args.conversationId, isActiveInConversation: true })
+      .lean()
+    if (existingActive) {
+      const ageMs = Date.now() - new Date(existingActive.startedAt).getTime()
+      if (ageMs > staleThresholdMs) {
+        this.logger.warn(
+          `[calls] auto-ending stale active call callId=${existingActive.callId} ageMs=${ageMs}`,
+        )
+        await this.calls.updateOne(
+          { conversationId: args.conversationId, callId: existingActive.callId },
+          { $set: { status: 'ended', endedAt: new Date(), isActiveInConversation: false } },
+        )
+      } else {
+        throw new Error('CALL_ALREADY_ACTIVE')
+      }
+    }
+
     const now = new Date()
 
     const participants: CallParticipant[] = []
@@ -175,22 +206,29 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const callType = args.callType ?? args.media ?? 'voice'
     const legacyMedia = callType.startsWith('video') ? 'video' : 'voice'
 
-    const doc = await this.calls.create({
-      conversationId: args.conversationId,
-      callId: args.callId,
-      createdBy: args.createdBy,
-      status: 'ringing',
-      startedAt: now,
-      endedAt: null,
-      callType,
-      media: args.media ?? legacyMedia,
-      viewerCount: 0,
-      participants,
-      signals: [],
-      isActiveInConversation: true,
-    })
+    try {
+      const doc = await this.calls.create({
+        conversationId: args.conversationId,
+        callId: args.callId,
+        createdBy: args.createdBy,
+        status: 'ringing',
+        startedAt: now,
+        endedAt: null,
+        callType,
+        media: args.media ?? legacyMedia,
+        viewerCount: 0,
+        participants,
+        signals: [],
+        isActiveInConversation: true,
+      })
 
-    return doc.toObject()
+      return doc.toObject()
+    } catch (e: any) {
+      // MongoDB duplicate key — another concurrent call.offer for same conversation
+      // slipped through the race window between our check and insert.
+      if (e?.code === 11000) throw new Error('CALL_ALREADY_ACTIVE')
+      throw e
+    }
   }
 
   async getCall(conversationId: string, callId: string): Promise<CallSession | null> {
