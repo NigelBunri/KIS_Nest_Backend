@@ -10,6 +10,7 @@ import { registerTypingHandlers, type TypingDeps } from './typing'
 import { registerSyncHandlers, type SyncDeps } from './sync'
 import { registerCallHandlers, type CallsDeps } from './calls'
 import { registerPinHandlers, type PinsDeps } from './pins'
+import { registerLiveHandlers, type LiveDeps } from './live'
 
 /**
  * Aggregate dependency type for all realtime handlers
@@ -23,6 +24,7 @@ export type HandlersDeps =
   & SyncDeps
   & CallsDeps
   & PinsDeps
+  & LiveDeps
 
 /**
  * Register all realtime socket handlers on a connected socket
@@ -42,4 +44,5 @@ export function registerRealtimeHandlers(
   registerSyncHandlers(server, socket, deps)
   registerCallHandlers(server, socket, deps)
   registerPinHandlers(server, socket, deps)
+  registerLiveHandlers(server, socket, deps)
 }
