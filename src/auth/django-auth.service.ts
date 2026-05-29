@@ -108,8 +108,8 @@ export class DjangoAuthService {
     }
 
     const username = String(
-      data?.username ??
-        data?.display_name ??
+      data?.display_name ??
+        data?.username ??
         (data?.email ? data.email.split('@')[0] : '') ??
         'user',
     );
@@ -211,8 +211,8 @@ export class DjangoAuthService {
     }
 
     const username = String(
-      payload?.username ??
-        payload?.display_name ??
+      payload?.display_name ??
+        payload?.username ??
         (payload?.email ? (payload.email as string).split('@')[0] : '') ??
         'user',
     );
