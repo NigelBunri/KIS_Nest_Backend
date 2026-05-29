@@ -46,6 +46,7 @@ export function registerTypingHandlers(server: Server, socket: Socket, deps: Typ
         safeEmit(server, rooms.convRoom(conversationId), EVT.TYPING, {
           conversationId,
           userId: principal.userId,
+          senderName: principal.username ?? undefined,
           isTyping: !!payload?.isTyping,
           threadId: payload?.threadId ?? null,
           at: new Date().toISOString(),
