@@ -98,6 +98,15 @@ function shouldServeUploadsPublicly() {
   return (process.env.NODE_ENV ?? '').toLowerCase() !== 'production';
 }
 
+function hasS3UploadConfig() {
+  return Boolean(
+    process.env.SUPABASE_S3_ENDPOINT_URL &&
+      process.env.SUPABASE_S3_ACCESS_KEY_ID &&
+      process.env.SUPABASE_S3_SECRET_ACCESS_KEY &&
+      process.env.SUPABASE_S3_BUCKET_NAME,
+  );
+}
+
 async function bootstrap() {
   assertProductionSecurityConfig();
 
@@ -132,20 +141,22 @@ async function bootstrap() {
     limits: { fileSize: 50 * 1024 * 1024 },
   });
 
-  const uploadsDir = process.env.UPLOADS_DIR || 'uploads';
-  const absUploads = join(process.cwd(), uploadsDir);
+  if (!hasS3UploadConfig()) {
+    const uploadsDir = process.env.UPLOADS_DIR || 'uploads';
+    const absUploads = join(process.cwd(), uploadsDir);
 
-  if (!existsSync(absUploads)) {
-    mkdirSync(absUploads, { recursive: true });
-  }
+    if (!existsSync(absUploads)) {
+      mkdirSync(absUploads, { recursive: true });
+    }
 
-  if (shouldServeUploadsPublicly()) {
-    await app.register(fastifyStatic, {
-      root: absUploads,
-      prefix: '/uploads/',
-      index: false,
-      decorateReply: false,
-    });
+    if (shouldServeUploadsPublicly()) {
+      await app.register(fastifyStatic, {
+        root: absUploads,
+        prefix: '/uploads/',
+        index: false,
+        decorateReply: false,
+      });
+    }
   }
 
   await app.register(fastifyStatic, {

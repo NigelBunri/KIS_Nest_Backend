@@ -1,7 +1,7 @@
 // src/storage/local-storage.service.ts
-import { Injectable } from '@nestjs/common';
-import { StorageService, StoredFile } from './storage.service';
-import { createWriteStream } from 'fs';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { StorageService, StoredFile, StoredFileStream } from './storage.service';
+import { createReadStream, createWriteStream, existsSync } from 'fs';
 import { join, normalize, resolve } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -26,6 +26,14 @@ export class LocalStorageService extends StorageService {
       throw new Error('Invalid upload key.');
     }
     return absolute;
+  }
+
+  async getFile(key: string): Promise<StoredFileStream> {
+    const absolutePath = this.pathForKey(key);
+    if (!existsSync(absolutePath)) {
+      throw new NotFoundException('File not found.');
+    }
+    return { body: createReadStream(absolutePath) };
   }
 
   async storeLocal(file: {

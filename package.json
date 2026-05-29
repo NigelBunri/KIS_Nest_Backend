@@ -28,6 +28,7 @@
     "@fastify/helmet": "^13.0.2",
     "@fastify/multipart": "^9.2.1",
     "@fastify/static": "^9.1.1",
+    "@aws-sdk/client-s3": "^3.699.0",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.1.18",
     "@nestjs/config": "^4.0.4",

@@ -3,7 +3,6 @@ import {
   BadRequestException,
   Controller,
   Get,
-  NotFoundException,
   Post,
   Query,
   Req,
@@ -12,8 +11,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify'; // ✅ type-only import fixes TS1272
 import '@fastify/multipart'; // ✅ bring in .file() augmentation (types-side effect)
-import { createReadStream, existsSync } from 'fs';
-import { LocalStorageService } from '../storage/local-storage.service';
+import { StorageService } from '../storage/storage.service';
 import { HttpAuthGuard } from '../auth/http-auth.guard';
 
 const SHORT_VIDEO_MAX_BYTES =
@@ -131,25 +129,20 @@ const uploadScanStatus = () =>
 @Controller('uploads')
 @UseGuards(HttpAuthGuard)
 export class UploadsController {
-  constructor(private readonly local: LocalStorageService) {}
+  constructor(private readonly storage: StorageService) {}
 
   @Get('file')
   async download(@Query('key') key: string, @Res() reply: FastifyReply) {
     if (!key) {
       throw new BadRequestException('A file key is required.');
     }
-    let absolutePath: string;
-    try {
-      absolutePath = this.local.pathForKey(key);
-    } catch {
-      throw new BadRequestException('Invalid file key.');
-    }
-    if (!existsSync(absolutePath)) {
-      throw new NotFoundException('File not found.');
-    }
+    const file = await this.storage.getFile(key);
     reply.header('cache-control', 'private, max-age=0, no-store');
-    reply.type('application/octet-stream');
-    return reply.send(createReadStream(absolutePath));
+    reply.type(file.mime || 'application/octet-stream');
+    if (file.size !== undefined) {
+      reply.header('content-length', String(file.size));
+    }
+    return reply.send(file.body);
   }
 
   @Post('file')
@@ -224,7 +217,7 @@ export class UploadsController {
     const publicBase =
       publicUploadsEnabled && host ? `${proto}://${host}/uploads` : undefined;
 
-    const stored = await this.local.storeLocal({
+    const stored = await this.storage.storeLocal({
       buffer,
       filename: mp.filename,
       mime: mp.mimetype || 'application/octet-stream',
