@@ -3,6 +3,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { AppController } from './app.controller';
 
 // ✅ Use canonical ChatModule
 import { ChatModule } from './chat/chat.module';
@@ -19,6 +20,7 @@ import { BroadcastModule } from './broadcast.module';
 import { FeedsModule } from './feeds.module';
 
 @Module({
+  controllers: [AppController],
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
 
