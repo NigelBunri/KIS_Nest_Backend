@@ -187,12 +187,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       logger.log('[messages] perms result', perms)
 
       const canSend =
-        perms?.canSend === true ||
-        (
-          perms?.isMember === true &&
-          perms?.isBlocked !== true &&
-          perms?.role === 'member'
-        )
+        perms?.isMember === true &&
+        perms?.isBlocked !== true &&
+        perms?.canSend !== false
       if (!canSend) {
         throw new Error('Send not allowed in this conversation')
       }

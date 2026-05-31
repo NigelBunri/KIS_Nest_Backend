@@ -121,12 +121,25 @@ export class DjangoConversationClient {
         data,
       });
       return data;
-    } catch (err) {
-      // Django is unreachable — serve stale entry rather than blocking the user
+    } catch (err: any) {
+      // Serve stale cache first — covers most cold-start windows
       if (cached && cached.staleUntil > now) {
         return cached.data;
       }
-      throw new UnauthorizedException('Conversation permission check failed');
+      // Explicit 4xx from Django (bad token, forbidden) — hard block
+      const httpStatus: number | undefined = err?.response?.status;
+      if (httpStatus && httpStatus >= 400 && httpStatus < 500) {
+        throw new UnauthorizedException('Conversation permission check failed');
+      }
+      // Network error / timeout / 5xx — Django is unreachable, allow through
+      // rather than killing every call during a cold start.
+      const fallback: DjangoWsPermsResponse = { isMember: true, isBlocked: false, canSend: true };
+      this.permsCache.set(cacheKey, {
+        expiresAt: now + 30_000,
+        staleUntil: now + this.permsStaleTtlMs,
+        data: fallback,
+      });
+      return fallback;
     }
   }
 
@@ -260,23 +273,29 @@ export class DjangoConversationClient {
 
     if (!url) return [];
 
-    const res = await firstValueFrom(
-      this.http.get<DjangoMemberIdsResponse>(url, {
-        headers: {
-          ...signedInternalHeaders({
-            method: 'GET',
-            url,
-            secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
-          }),
-        },
-        timeout: 5000,
-      }),
-    );
+    try {
+      const res = await firstValueFrom(
+        this.http.get<DjangoMemberIdsResponse>(url, {
+          headers: {
+            ...signedInternalHeaders({
+              method: 'GET',
+              url,
+              secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+            }),
+          },
+          timeout: 5000,
+        }),
+      );
 
-    const data = res?.data ?? {};
-    const ids = (data.user_ids ?? data.userIds ?? []).map((id) => String(id));
-    this.memberIdsCache.set(conversationId, { expiresAt: now + this.memberIdsTtlMs, ids });
-    return ids;
+      const data = res?.data ?? {};
+      const ids = (data.user_ids ?? data.userIds ?? []).map((id) => String(id));
+      this.memberIdsCache.set(conversationId, { expiresAt: now + this.memberIdsTtlMs, ids });
+      return ids;
+    } catch {
+      // Serve stale cache if Django is unreachable so CONVERSATION_UPDATED still broadcasts
+      if (cached) return cached.ids;
+      return [];
+    }
   }
 
   async policyCheck(args: {
