@@ -30,6 +30,14 @@ export interface DjangoPolicyCheckResponse {
   warn?: string[];
 }
 
+function applyConversationIdTemplate(url: string | undefined, conversationId: string) {
+  if (!url) return undefined;
+  const encoded = encodeURIComponent(conversationId);
+  return url
+    .replace(/\{conversationId\}/g, encoded)
+    .replace(/\{conversation_id\}/g, encoded);
+}
+
 @Injectable()
 export class DjangoConversationClient {
   constructor(private readonly http: HttpService) {}
@@ -81,10 +89,7 @@ export class DjangoConversationClient {
     }
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_PERMS_URL?.replace(
-        '{conversationId}',
-        conversationId,
-      ) ??
+      applyConversationIdTemplate(process.env.DJANGO_CONV_PERMS_URL, conversationId) ??
       (base
         ? `${base}/chat/conversations/${conversationId}/ws-perms/`
         : undefined);
@@ -175,7 +180,7 @@ export class DjangoConversationClient {
   }) {
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_UPDATE_LAST_MESSAGE_URL ??
+      applyConversationIdTemplate(process.env.DJANGO_CONV_UPDATE_LAST_MESSAGE_URL, args.conversationId) ??
       (base
         ? `${base}/chat/conversations/${args.conversationId}/update-last-message/`
         : undefined);
@@ -214,7 +219,7 @@ export class DjangoConversationClient {
   }) {
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_UPDATE_READ_STATE_URL ??
+      applyConversationIdTemplate(process.env.DJANGO_CONV_UPDATE_READ_STATE_URL, args.conversationId) ??
       (base
         ? `${base}/chat/conversations/${args.conversationId}/update-read-state/`
         : undefined);
@@ -266,7 +271,7 @@ export class DjangoConversationClient {
 
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_MEMBER_IDS_URL ??
+      applyConversationIdTemplate(process.env.DJANGO_CONV_MEMBER_IDS_URL, conversationId) ??
       (base
         ? `${base}/chat/conversations/${conversationId}/member-ids/`
         : undefined);
@@ -309,7 +314,7 @@ export class DjangoConversationClient {
     }
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_POLICY_CHECK_URL ??
+      applyConversationIdTemplate(process.env.DJANGO_CONV_POLICY_CHECK_URL, args.conversationId) ??
       (base
         ? `${base}/chat/conversations/${args.conversationId}/policy-check/`
         : undefined);
