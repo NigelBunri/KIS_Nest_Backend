@@ -49,6 +49,49 @@ function attachmentNeedsSafetyReview(attachment: any): boolean {
   )
 }
 
+
+function safeJson(value: unknown) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[unserializable]'
+  }
+}
+
+function publicErrorDiagnostics(error: any) {
+  const response = error?.response
+  const config = error?.config
+  let upstreamPath: string | undefined
+  if (typeof config?.url === 'string') {
+    try {
+      const parsed = new URL(config.url)
+      upstreamPath = `${parsed.pathname}${parsed.search}`
+    } catch {
+      upstreamPath = config.url.replace(/https?:\/\/[^/]+/i, '')
+    }
+  }
+
+  const upstreamData = response?.data
+  const upstreamMessage =
+    typeof upstreamData?.detail === 'string'
+      ? upstreamData.detail
+      : typeof upstreamData?.message === 'string'
+        ? upstreamData.message
+        : typeof upstreamData?.error === 'string'
+          ? upstreamData.error
+          : undefined
+
+  return {
+    message: error?.message ?? 'Send failed',
+    name: error?.name,
+    upstreamStatus: response?.status,
+    upstreamPath,
+    upstreamMethod: typeof config?.method === 'string' ? config.method.toUpperCase() : undefined,
+    upstreamMessage,
+    upstreamData,
+  }
+}
+
 function assertSafeMessageMedia(payload: SendMessagePayload) {
   const attachments = Array.isArray((payload as any)?.attachments)
     ? (payload as any).attachments
@@ -307,11 +350,15 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
       )
     } catch (e: any) {
+      const diagnostics = publicErrorDiagnostics(e)
       logger.error(
-        `[messages] send failed conversationId=${conversationId} userId=${principal?.userId}`,
+        `[messages] send failed conversationId=${conversationId} userId=${principal?.userId} diagnostics=${safeJson(diagnostics)}`,
         e?.stack ?? e?.message ?? e,
       )
-      safeAck(ack, err(e?.message ?? 'Send failed', 'ERROR'))
+      safeAck(ack, {
+        ...err(e?.message ?? 'Send failed', 'ERROR'),
+        diagnostics,
+      } as any)
     }
   })
 
