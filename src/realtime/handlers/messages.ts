@@ -58,38 +58,59 @@ function safeJson(value: unknown) {
   }
 }
 
-function publicErrorDiagnostics(error: any) {
+function urlPathOnly(url?: string) {
+  if (!url) return undefined
+  try {
+    const parsed = new URL(url)
+    return `${parsed.pathname}${parsed.search}`
+  } catch {
+    return url.replace(/https?:\/\/[^/]+/i, '')
+  }
+}
+
+function pickUpstreamMessage(data: any) {
+  if (typeof data?.detail === 'string') return data.detail
+  if (typeof data?.message === 'string') return data.message
+  if (typeof data?.error === 'string') return data.error
+  return undefined
+}
+
+function publicErrorDiagnostics(error: any, context: Record<string, any>) {
   const response = error?.response
   const config = error?.config
-  let upstreamPath: string | undefined
-  if (typeof config?.url === 'string') {
-    try {
-      const parsed = new URL(config.url)
-      upstreamPath = `${parsed.pathname}${parsed.search}`
-    } catch {
-      upstreamPath = config.url.replace(/https?:\/\/[^/]+/i, '')
-    }
-  }
-
   const upstreamData = response?.data
-  const upstreamMessage =
-    typeof upstreamData?.detail === 'string'
-      ? upstreamData.detail
-      : typeof upstreamData?.message === 'string'
-        ? upstreamData.message
-        : typeof upstreamData?.error === 'string'
-          ? upstreamData.error
-          : undefined
-
   return {
-    message: error?.message ?? 'Send failed',
+    source: 'nest:chat.messages',
+    at: new Date().toISOString(),
+    ...context,
+    message: error?.message ?? 'Messaging operation failed',
     name: error?.name,
+    code: error?.code,
+    stack: process.env.NODE_ENV === 'production' ? undefined : error?.stack,
     upstreamStatus: response?.status,
-    upstreamPath,
+    upstreamStatusText: response?.statusText,
+    upstreamPath: urlPathOnly(config?.url),
     upstreamMethod: typeof config?.method === 'string' ? config.method.toUpperCase() : undefined,
-    upstreamMessage,
+    upstreamTimeoutMs: config?.timeout,
+    upstreamMessage: pickUpstreamMessage(upstreamData),
     upstreamData,
   }
+}
+
+function ackError(error: any, fallback: string, context: Record<string, any>) {
+  const diagnostics = publicErrorDiagnostics(error, context)
+  return {
+    ...err(error?.message ?? fallback, error?.code ?? 'ERROR'),
+    diagnostics,
+  }
+}
+
+function logMessagingError(error: any, context: Record<string, any>) {
+  const diagnostics = publicErrorDiagnostics(error, context)
+  logger.error(
+    `[messages] ${context.event ?? 'chat'} failed diagnostics=${safeJson(diagnostics)}`,
+    error?.stack ?? error?.message ?? error,
+  )
 }
 
 function assertSafeMessageMedia(payload: SendMessagePayload) {
@@ -216,6 +237,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       text: textPreview,
     })
 
+    let stage = 'send.start'
     try {
       const hasEncryptedPayload = !!(
         payload?.ciphertext ||
@@ -223,8 +245,11 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         payload?.encrypted
       )
 
+      stage = 'send.rate_limit'
       await deps.rateLimitService.assert(principal, `send:${conversationId}`, 50)
+      stage = 'send.assert_member'
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
+      stage = 'send.media_safety'
       assertSafeMessageMedia(payload)
 
       logger.log('[messages] perms result', perms)
@@ -237,6 +262,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         throw new Error('Send not allowed in this conversation')
       }
       if (deps.djangoConversationClient.policyCheck) {
+        stage = 'send.policy_check'
         const policy = await deps.djangoConversationClient.policyCheck({
           principal,
           conversationId,
@@ -248,6 +274,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         }
       }
 
+      stage = 'send.allocate_seq'
       const seq = deps.djangoSeqClient.allocateSeq
         ? await deps.djangoSeqClient.allocateSeq(conversationId)
         : deps.djangoSeqClient.allocate
@@ -256,6 +283,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
             throw new Error('Seq allocator not configured')
           })()
 
+      stage = 'send.persist_message'
       const created = await deps.messagesService.createIdempotent({
         senderId: principal.userId,
         senderDeviceId: principal.deviceId,
@@ -350,15 +378,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
       )
     } catch (e: any) {
-      const diagnostics = publicErrorDiagnostics(e)
-      logger.error(
-        `[messages] send failed conversationId=${conversationId} userId=${principal?.userId} diagnostics=${safeJson(diagnostics)}`,
-        e?.stack ?? e?.message ?? e,
-      )
-      safeAck(ack, {
-        ...err(e?.message ?? 'Send failed', 'ERROR'),
-        diagnostics,
-      } as any)
+      const context = {
+        event: EVT.SEND,
+        stage,
+        conversationId,
+        clientId,
+        userId: principal?.userId,
+        deviceId: principal?.deviceId,
+      }
+      logMessagingError(e, context)
+      safeAck(ack, ackError(e, 'Send failed', context))
     }
   })
 
@@ -373,13 +402,17 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     const conversationId = payload?.conversationId
     const messageId = payload?.messageId
 
+    let stage = 'edit.start'
     try {
+      stage = 'edit.rate_limit'
       await deps.rateLimitService.assert(principal, `edit:${conversationId}`, 60)
+      stage = 'edit.assert_member'
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
       if (perms?.canSend === false) {
         throw new Error('Edit not allowed in this conversation')
       }
       if (deps.moderationService) {
+        stage = 'edit.moderation'
         await deps.moderationService.assertAllowed({
           conversationId,
           userId: principal.userId,
@@ -392,6 +425,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
           payload?.encryptionMeta ||
           payload?.encrypted
         )
+        stage = 'edit.policy_check'
         const policy = await deps.djangoConversationClient.policyCheck({
           principal,
           conversationId,
@@ -403,6 +437,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         }
       }
 
+      stage = 'edit.persist_message'
       const updated = await deps.messagesService.editMessage({
         senderId: principal.userId,
         conversationId,
@@ -428,7 +463,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       } catch {}
       safeAck(ack, ok({ updated: true }))
     } catch (e: any) {
-      safeAck(ack, err(e?.message ?? 'Edit failed', 'ERROR'))
+      const context = {
+        event: EVT.EDIT,
+        stage,
+        conversationId,
+        messageId,
+        userId: principal?.userId,
+        deviceId: principal?.deviceId,
+      }
+      logMessagingError(e, context)
+      safeAck(ack, ackError(e, 'Edit failed', context))
     }
   })
 
@@ -443,13 +487,17 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     const conversationId = payload?.conversationId
     const messageId = payload?.messageId
 
+    let stage = 'delete.start'
     try {
+      stage = 'delete.rate_limit'
       await deps.rateLimitService.assert(principal, `delete:${conversationId}`, 60)
+      stage = 'delete.assert_member'
       const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
       if (perms?.canSend === false) {
         throw new Error('Delete not allowed in this conversation')
       }
       if (deps.moderationService) {
+        stage = 'delete.moderation'
         await deps.moderationService.assertAllowed({
           conversationId,
           userId: principal.userId,
@@ -457,6 +505,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         })
       }
       if (deps.djangoConversationClient.policyCheck) {
+        stage = 'delete.policy_check'
         const policy = await deps.djangoConversationClient.policyCheck({
           principal,
           conversationId,
@@ -467,6 +516,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         }
       }
 
+      stage = 'delete.persist_message'
       const deleted = await deps.messagesService.deleteMessage({
         senderId: principal.userId,
         conversationId,
@@ -491,7 +541,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       } catch {}
       safeAck(ack, ok({ deleted: true }))
     } catch (e: any) {
-      safeAck(ack, err(e?.message ?? 'Delete failed', 'ERROR'))
+      const context = {
+        event: EVT.DELETE,
+        stage,
+        conversationId,
+        messageId,
+        userId: principal?.userId,
+        deviceId: principal?.deviceId,
+      }
+      logMessagingError(e, context)
+      safeAck(ack, ackError(e, 'Delete failed', context))
     }
   })
 
@@ -505,10 +564,14 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
     const conversationId = payload?.conversationId
 
+    let stage = 'history.start'
     try {
+      stage = 'history.rate_limit'
       await deps.rateLimitService.assert(principal, `history:${conversationId}`, 30)
+      stage = 'history.assert_member'
       await deps.djangoConversationClient.assertMember(principal, conversationId)
 
+      stage = 'history.list_recent'
       const items = await deps.messagesService.listRecent({
         conversationId,
         limit: payload?.limit,
@@ -518,7 +581,15 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       safeAck(ack, ok({ messages: items }))
     } catch (e: any) {
-      safeAck(ack, err(e?.message ?? 'History failed', 'ERROR'))
+      const context = {
+        event: EVT.HISTORY,
+        stage,
+        conversationId,
+        userId: principal?.userId,
+        deviceId: principal?.deviceId,
+      }
+      logMessagingError(e, context)
+      safeAck(ack, ackError(e, 'History failed', context))
     }
   })
 }

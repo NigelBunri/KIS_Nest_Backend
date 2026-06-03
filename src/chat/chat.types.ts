@@ -310,6 +310,7 @@ export interface AckErr {
   ok: false
   error: string
   code?: string
+  diagnostics?: Record<string, any>
 }
 
 export type Ack<T = any> = AckOk<T> | AckErr
