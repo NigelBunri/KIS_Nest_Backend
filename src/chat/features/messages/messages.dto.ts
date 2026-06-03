@@ -139,6 +139,9 @@ export class SendMessageDto {
   @IsOptional() @IsObject()
   encryptionMeta?: Record<string, any>;
 
+  @IsOptional()
+  encrypted?: boolean;
+
   @IsOptional() @IsString()
   iv?: string;
 

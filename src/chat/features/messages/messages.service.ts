@@ -454,13 +454,13 @@ export class MessagesService {
   }
 
   private buildPreview(input: SendMessageDto): string | undefined {
+    if (input.ciphertext || input.encryptionMeta || input.encrypted) {
+      return 'Encrypted message'
+    }
     const explicitPreview = typeof input.previewText === 'string'
       ? input.previewText.trim().slice(0, 200)
       : ''
     if (explicitPreview) return explicitPreview
-    if (!input.text && (input.ciphertext || input.encryptionMeta)) {
-      return 'Encrypted message'
-    }
     switch (input.kind) {
       case 'text':
         return input.text?.slice(0, 200)
