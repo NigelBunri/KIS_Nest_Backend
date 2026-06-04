@@ -107,6 +107,9 @@ function hasS3UploadConfig() {
   );
 }
 
+const DEFAULT_MAX_UPLOAD_BYTES = 2_147_483_647
+const uploadMaxBytes = () => Number(process.env.UPLOAD_MAX_BYTES) || DEFAULT_MAX_UPLOAD_BYTES
+
 async function bootstrap() {
   assertProductionSecurityConfig();
 
@@ -138,7 +141,7 @@ async function bootstrap() {
   });
 
   await app.register(fastifyMultipart, {
-    limits: { fileSize: 50 * 1024 * 1024 },
+    limits: { fileSize: uploadMaxBytes() },
   });
 
   if (!hasS3UploadConfig()) {

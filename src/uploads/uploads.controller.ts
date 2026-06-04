@@ -18,8 +18,9 @@ const SHORT_VIDEO_MAX_BYTES =
   Number(process.env.SHORT_VIDEO_MAX_BYTES) || 15 * 1024 * 1024; // ~15MB
 const SHORT_VIDEO_DURATION_SECONDS =
   Number(process.env.SHORT_VIDEO_DURATION_SECONDS) || 3 * 60;
+const DEFAULT_MAX_UPLOAD_BYTES = 2_147_483_647;
 const MAX_UPLOAD_BYTES =
-  Number(process.env.UPLOAD_MAX_BYTES) || 50 * 1024 * 1024;
+  Number(process.env.UPLOAD_MAX_BYTES) || DEFAULT_MAX_UPLOAD_BYTES;
 const BLOCKED_EXTENSIONS = new Set([
   'apk',
   'app',
@@ -205,7 +206,7 @@ export class UploadsController {
 
     const size = buffer.length;
     if (size > MAX_UPLOAD_BYTES) {
-      throw new BadRequestException('File too large.');
+      throw new BadRequestException(`File too large. Current limit is ${MAX_UPLOAD_BYTES} bytes.`);
     }
 
     const host = req.headers?.host;
