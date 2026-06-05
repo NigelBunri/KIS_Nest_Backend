@@ -114,9 +114,13 @@ function logMessagingError(error: any, context: Record<string, any>) {
 }
 
 function assertSafeMessageMedia(payload: SendMessagePayload) {
-  const attachments = Array.isArray((payload as any)?.attachments)
+  const legacyAttachments = Array.isArray((payload as any)?.attachments)
     ? (payload as any).attachments
     : []
+  const mediaAttachments = Array.isArray((payload as any)?.media?.attachments)
+    ? (payload as any).media.attachments
+    : []
+  const attachments = [...legacyAttachments, ...mediaAttachments]
   const unsafe = attachments.find(attachmentNeedsSafetyReview)
   if (unsafe) {
     logger.warn('[messages] blocked unsafe or unreviewed media attachment', {

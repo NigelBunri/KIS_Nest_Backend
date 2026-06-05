@@ -180,6 +180,10 @@ export class SendMessageDto {
   attachments?: AttachmentDto[];
 
   @IsOptional()
+  @IsObject()
+  media?: Record<string, any>;
+
+  @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
   @ValidateNested({ each: true })

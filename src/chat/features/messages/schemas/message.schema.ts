@@ -132,6 +132,7 @@ const EphemeralSchema = SchemaFactory.createForClass(Ephemeral);
 
 export type MessageKind =
   | 'text'
+  | 'attachment'
   | 'voice'
   | 'styled_text'
   | 'sticker'
@@ -158,7 +159,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event'],
   })
   kind!: MessageKind;
 
@@ -182,6 +183,9 @@ export class Message {
 
   @Prop({ type: [AttachmentSchema], default: undefined })
   attachments?: Attachment[];
+
+  @Prop({ type: Object, default: undefined })
+  media?: Record<string, any>;
 
   @Prop({ type: [ContactCardSchema], default: undefined })
   contacts?: ContactCard[];

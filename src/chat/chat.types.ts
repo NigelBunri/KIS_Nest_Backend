@@ -6,6 +6,7 @@
 
 export enum MessageKind {
   TEXT = 'text',
+  ATTACHMENT = 'attachment',
   STYLED_TEXT = 'styled_text',
   VOICE = 'voice',
   STICKER = 'sticker',
@@ -140,6 +141,17 @@ export type EventKey = (typeof EVT)[keyof typeof EVT]
  * ========================= */
 
 export interface AttachmentPayload {
+  publicUrl?: string
+  downloadUrl?: string
+  displayUrl?: string
+  assetId?: string
+  mediaAssetId?: string
+  mediaAssetRef?: string
+  kind?: string
+  thumbUrl?: string
+  private?: boolean
+  scanStatus?: string
+  quarantined?: boolean
   id?: string
   url: string
   name?: string
@@ -223,6 +235,10 @@ export interface SendMessagePayload {
   previewText?: string
   styledText?: StyledTextPayload
   attachments?: AttachmentPayload[]
+  media?: {
+    attachments?: AttachmentPayload[]
+    [key: string]: any
+  }
   voice?: VoicePayload
   sticker?: StickerPayload
   contacts?: ContactPayload[]

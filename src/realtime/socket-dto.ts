@@ -100,6 +100,9 @@ export class SendMessageDto {
   attachments?: unknown[];
 
   @IsOptional()
+  media?: unknown;
+
+  @IsOptional()
   encryptionMeta?: unknown;
 
   @IsOptional()

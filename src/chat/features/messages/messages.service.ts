@@ -59,6 +59,7 @@ export class MessagesService {
       sticker: input.sticker,
 
       attachments: input.attachments,
+      media: (input as any).media,
       contacts: input.contacts,
       poll: input.poll,
       event: input.event,
@@ -96,6 +97,12 @@ export class MessagesService {
   }): Promise<{ id: string; seq: number; createdAt: Date; dto: any }> {
     // Convert payload into legacy DTO shape.
     // Most fields already match names; keep as any for now to unblock compile.
+    const rawMedia = (args.input as any).media && typeof (args.input as any).media === 'object'
+      ? (args.input as any).media
+      : undefined
+    const mediaAttachments = Array.isArray(rawMedia?.attachments)
+      ? this.normalizeAttachments(rawMedia.attachments)
+      : undefined
     const legacyInput: SendMessageDto = {
       ...(args.input as any),
       conversationId: args.conversationId,
@@ -103,6 +110,7 @@ export class MessagesService {
       // your schema expects replyToId (frontend uses replyTo)
       replyToId: (args.input as any).replyToId ?? (args.input as any).replyTo,
       attachments: this.normalizeAttachments((args.input as any).attachments),
+      media: rawMedia ? { ...rawMedia, attachments: mediaAttachments ?? [] } : undefined,
     }
 
     const doc = await this.createIdempotentLegacy({
@@ -220,6 +228,7 @@ export class MessagesService {
       voice: (msg as any).voice,
       sticker: (msg as any).sticker,
       attachments: (msg as any).attachments,
+      media: (msg as any).media,
       contacts: (msg as any).contacts,
       poll: (msg as any).poll,
       event: (msg as any).event,
@@ -398,6 +407,7 @@ export class MessagesService {
 
     const allowedKinds = new Set([
       'text',
+      'attachment',
       'styled_text',
       'voice',
       'sticker',
@@ -413,7 +423,10 @@ export class MessagesService {
     const hasStyled = !!input.styledText
     const hasVoice = !!input.voice
     const hasSticker = !!input.sticker
-    const hasAttachments = !!(input.attachments && input.attachments.length)
+    const mediaAttachments = Array.isArray((input as any).media?.attachments)
+      ? (input as any).media.attachments
+      : []
+    const hasAttachments = !!((input.attachments && input.attachments.length) || mediaAttachments.length)
     const hasContacts = !!(input.contacts && input.contacts.length)
     const hasPoll = !!input.poll
     const hasEvent = !!input.event
@@ -421,6 +434,9 @@ export class MessagesService {
     switch (kind) {
       case 'text':
         if (!hasText && !hasAttachments) throw new BadRequestException('text messages require text or attachments')
+        break
+      case 'attachment':
+        if (!hasAttachments) throw new BadRequestException('attachment messages require media.attachments')
         break
       case 'styled_text':
         if (!hasStyled) throw new BadRequestException('styled_text requires styledText payload')
@@ -463,7 +479,13 @@ export class MessagesService {
     if (explicitPreview) return explicitPreview
     switch (input.kind) {
       case 'text':
-        return input.text?.slice(0, 200)
+        return input.text?.slice(0, 200) ?? (Array.isArray((input as any).media?.attachments) ? 'Attachment' : undefined)
+      case 'attachment': {
+        const first = Array.isArray((input as any).media?.attachments)
+          ? (input as any).media.attachments[0]
+          : input.attachments?.[0]
+        return first?.originalName ?? first?.name ?? 'Attachment'
+      }
       case 'styled_text':
         return input.styledText?.text?.slice(0, 200)
       case 'voice':
