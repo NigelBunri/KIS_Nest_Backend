@@ -128,17 +128,20 @@ const uploadScanStatus = () =>
     : 'not_configured';
 
 @Controller('uploads')
-@UseGuards(HttpAuthGuard)
 export class UploadsController {
   constructor(private readonly storage: StorageService) {}
 
+  // No auth required on download — keys contain random UUIDs so they are
+  // not guessable, and removing auth eliminates the Django introspect
+  // round-trip that was causing image-load timeouts on Render.com free tier.
   @Get('file')
   async download(@Query('key') key: string, @Res() reply: FastifyReply) {
     if (!key) {
       throw new BadRequestException('A file key is required.');
     }
     const file = await this.storage.getFile(key);
-    reply.header('cache-control', 'private, max-age=0, no-store');
+    const isS3Proxy = this.storage.driver() === 's3';
+    reply.header('cache-control', isS3Proxy ? 'public, max-age=31536000, immutable' : 'private, max-age=0, no-store');
     reply.type(file.mime || 'application/octet-stream');
     if (file.size !== undefined) {
       reply.header('content-length', String(file.size));
@@ -147,6 +150,7 @@ export class UploadsController {
   }
 
   @Post('file')
+  @UseGuards(HttpAuthGuard)
   async upload(@Req() req: FastifyRequest) {
     // Parse a single file via @fastify/multipart
     // (FastifyRequest doesn't know .file() unless you wire generics; simplest is cast)
@@ -264,10 +268,26 @@ export class UploadsController {
           ? 'videos'
           : undefined;
 
+    // When S3/Supabase is active, stored.url is the CDN public URL — use it
+    // directly so images load from the CDN without a NestJS proxy hop.
+    // For local-filesystem storage, always use the key-based download endpoint
+    // for both display and download: @fastify/static does not decode %2F in
+    // URL paths (security policy), so a static path like
+    // /uploads/2026-06-09%2Fuuid.jpg returns 404. The ?key= query-param
+    // endpoint is always safe because query params are decoded before lookup.
+    const isS3 = this.storage.driver() === 's3';
+    const primaryUrl = isS3 ? stored.url : authenticatedDownloadUrl;
+    const primaryPublicUrl = isS3 ? stored.url : undefined;
+
+    // Files expire from S3 after 10 days. The cleanup job uses this field.
+    const FILE_TTL_DAYS = Number(process.env.ATTACHMENT_TTL_DAYS || '10');
+    const expiresAt = new Date(Date.now() + FILE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
     const attachmentResponse: Record<string, unknown> = {
       id: stored.key,
-      url: publicUploadsEnabled ? stored.url : authenticatedDownloadUrl,
-      publicUrl: publicUploadsEnabled ? stored.url : undefined,
+      url: primaryUrl,
+      publicUrl: primaryPublicUrl,
+      displayUrl: primaryUrl,
       downloadUrl: authenticatedDownloadUrl,
       name: stored.name,
       mime: stored.mime,
@@ -275,8 +295,10 @@ export class UploadsController {
       mimeType: stored.mime,
       size: stored.size,
       kind,
-      visibility: publicUploadsEnabled ? 'public' : 'private',
-      private: !publicUploadsEnabled,
+      expiresAt,
+      expired: false,
+      visibility: (isS3 || publicUploadsEnabled) ? 'public' : 'private',
+      private: !isS3 && !publicUploadsEnabled,
       scanStatus: uploadScanStatus(),
       quarantined: uploadScanStatus() === 'pending',
     };

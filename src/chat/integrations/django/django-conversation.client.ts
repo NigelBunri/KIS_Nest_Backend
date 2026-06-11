@@ -120,11 +120,16 @@ export class DjangoConversationClient {
       );
 
       const data = res.data;
-      this.permsCache.set(cacheKey, {
-        expiresAt: now + this.permsTtlMs,
-        staleUntil: now + this.permsStaleTtlMs,
-        data,
-      });
+      // Only cache positive membership results. A false result may mean the
+      // group was just created and the member record hasn't propagated yet —
+      // caching it for 2 minutes would lock out a brand-new group owner.
+      if (data.isMember) {
+        this.permsCache.set(cacheKey, {
+          expiresAt: now + this.permsTtlMs,
+          staleUntil: now + this.permsStaleTtlMs,
+          data,
+        });
+      }
       return data;
     } catch (err: any) {
       // Serve stale cache first — covers most cold-start windows
@@ -358,7 +363,10 @@ export class DjangoConversationClient {
   }): Promise<{ delivered: number }> {
     const base = this.djangoApiBase();
     const url =
-      process.env.DJANGO_CONV_WEBHOOK_DISPATCH_URL ??
+      applyConversationIdTemplate(
+        process.env.DJANGO_CONV_WEBHOOK_DISPATCH_URL,
+        args.conversationId,
+      ) ??
       (base
         ? `${base}/chat/conversations/${args.conversationId}/webhook-dispatch/`
         : undefined);

@@ -15,5 +15,5 @@ export abstract class StorageService {
     publicBase?: string;
   }): Promise<StoredFile>;
   abstract getFile(key: string): Promise<StoredFileStream>;
-  // Future: abstract presign(req: PresignRequest): Promise<PresignResult>; // for S3
+  abstract deleteFile(key: string): Promise<void>;
 }

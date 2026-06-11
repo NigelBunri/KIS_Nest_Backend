@@ -14,6 +14,7 @@ export enum MessageKind {
   CONTACTS = 'contacts',
   POLL = 'poll',
   EVENT = 'event',
+  LOCATION = 'location',
 }
 
 /**
@@ -132,6 +133,39 @@ export const EVT = {
 
   // calls — broadcast stats
   CALL_VIEWER_COUNT: 'call.viewer.count',
+
+  // live location
+  LOCATION_UPDATE: 'chat.location_update',
+
+  // view-once acknowledgement (recipient tells server they opened it)
+  VIEW_ONCE: 'chat.view_once',
+
+  // fetch which messages the current user has starred in a conversation
+  GET_STARRED: 'chat.get_starred',
+
+  // GAP 9: group invite link regeneration
+  GROUP_REGENERATE_INVITE: 'group.regenerate_invite',
+
+  // GAP 13: extended activity sub-states (recording, location sharing)
+  ACTIVITY: 'chat.activity',
+
+  // GAP 20: thread subject update
+  THREAD_UPDATE_SUBJECT: 'thread.update_subject',
+
+  // GAP 26: user preference sync
+  USER_SYNC_PREFERENCE: 'user.sync_preference',
+  USER_GET_PREFERENCE: 'user.get_preference',
+
+  // GAP 1: screen sharing in calls
+  CALL_SCREEN_SHARE: 'call.screen_share',
+
+  // GAP 4: payment messages
+  PAYMENT_ACCEPT: 'payment.accept',
+  PAYMENT_DECLINE: 'payment.decline',
+
+  // GAP 5: multi-device session management
+  USER_GET_DEVICES: 'user.get_devices',
+  USER_REMOVE_DEVICE: 'user.remove_device',
 } as const
 
 export type EventKey = (typeof EVT)[keyof typeof EVT]
@@ -217,6 +251,13 @@ export interface EventPayload {
   endsAt?: Date
 }
 
+export interface LocationPayload {
+  latitude: number
+  longitude: number
+  address?: string
+  title?: string
+}
+
 /* =========================
  * Send / Edit Payloads
  * ========================= */
@@ -244,6 +285,7 @@ export interface SendMessagePayload {
   contacts?: ContactPayload[]
   poll?: PollPayload
   event?: EventPayload
+  location?: LocationPayload
 
   threadId?: string
   replyTo?: string

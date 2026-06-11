@@ -63,6 +63,8 @@ export class MessagesService {
       contacts: input.contacts,
       poll: input.poll,
       event: input.event,
+      location: (input as any).location,
+      linkPreview: (input as any).linkPreview,
 
       replyToId: input.replyToId,
 
@@ -204,6 +206,12 @@ export class MessagesService {
       throw new ForbiddenException('only sender can edit')
     }
     if ((msg as any).isDeleted) throw new BadRequestException('cannot edit deleted message')
+    const EDIT_WINDOW_MS = 15 * 60 * 1000
+    const msgCreatedAt = (msg as any).createdAt
+    if (msgCreatedAt) {
+      const age = nowMs - (msgCreatedAt instanceof Date ? msgCreatedAt.getTime() : Number(msgCreatedAt))
+      if (age > EDIT_WINDOW_MS) throw new BadRequestException('messages can only be edited within 15 minutes of sending')
+    }
 
     if (typeof input.text === 'string') (msg as any).text = input.text
     if (Array.isArray(input.attachments)) (msg as any).attachments = input.attachments as any
@@ -328,7 +336,14 @@ export class MessagesService {
       .lean()
       .exec()
 
-    return rows.reverse()
+    // .lean() strips the Mongoose `id` virtual (string form of _id).
+    // Without it, the frontend receives an ObjectId object instead of a
+    // string, which breaks key-based merging against locally-cached messages
+    // and causes every history message to appear as a new (encrypted) entry.
+    return rows.reverse().map((row) => {
+      const idStr = row._id?.toString?.() ?? String(row._id ?? '');
+      return { ...row, _id: idStr, id: idStr };
+    });
   }
 
   async listRecentForConversations(args: {
@@ -414,6 +429,7 @@ export class MessagesService {
       'contacts',
       'poll',
       'event',
+      'location',
       'system',
     ])
     if (!allowedKinds.has(kind)) throw new BadRequestException(`Unsupported kind: ${String(kind)}`)
@@ -430,6 +446,7 @@ export class MessagesService {
     const hasContacts = !!(input.contacts && input.contacts.length)
     const hasPoll = !!input.poll
     const hasEvent = !!input.event
+    const hasLocation = !!(input as any).location
 
     switch (kind) {
       case 'text':
@@ -456,6 +473,9 @@ export class MessagesService {
       case 'event':
         if (!hasEvent) throw new BadRequestException('event requires event payload')
         break
+      case 'location':
+        if (!hasLocation) throw new BadRequestException('location requires location payload')
+        break
       case 'system':
         if (!hasText) throw new BadRequestException('system requires text')
         break
@@ -467,6 +487,7 @@ export class MessagesService {
     if (kind !== 'contacts' && hasContacts) throw new BadRequestException('contacts payload only allowed for contacts kind')
     if (kind !== 'poll' && hasPoll) throw new BadRequestException('poll payload only allowed for poll kind')
     if (kind !== 'event' && hasEvent) throw new BadRequestException('event payload only allowed for event kind')
+    if (kind !== 'location' && hasLocation) throw new BadRequestException('location payload only allowed for location kind')
   }
 
   private buildPreview(input: SendMessageDto): string | undefined {
@@ -498,6 +519,8 @@ export class MessagesService {
         return `📊 ${input.poll?.question ?? 'Poll'}`
       case 'event':
         return `📅 ${input.event?.title ?? 'Event'}`
+      case 'location':
+        return `📍 ${(input as any).location?.title ?? (input as any).location?.address ?? 'Location'}`
       case 'system':
         return input.text?.slice(0, 200)
       default:
@@ -519,6 +542,10 @@ export class MessagesService {
       height: a.height,
       durationMs: a.durationMs,
       thumbUrl: a.thumbUrl,
+      expiresAt: a.expiresAt ?? undefined,
+      expired: a.expired ?? false,
+      viewOnce: a.viewOnce ?? false,
+      viewedAt: a.viewedAt ?? undefined,
     }))
   }
 }

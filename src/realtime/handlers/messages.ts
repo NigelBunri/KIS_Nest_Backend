@@ -558,6 +558,61 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     }
   })
 
+  socket.on(EVT.LOCATION_UPDATE, async (payload: any, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const { conversationId, messageId, latitude, longitude, address, expiresAt } = payload || {}
+
+    if (!conversationId || !messageId || latitude == null || longitude == null) {
+      return safeAck(ack, err('conversationId, messageId, latitude, longitude required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService.assert(principal, `location_update:${conversationId}`, 120)
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+      safeEmit(server, rooms.convRoom(conversationId), EVT.LOCATION_UPDATE, {
+        conversationId,
+        messageId,
+        latitude,
+        longitude,
+        address,
+        expiresAt,
+        userId: principal.userId,
+        at: Date.now(),
+      })
+      safeAck(ack, ok({ ok: true }))
+    } catch (e: any) {
+      safeAck(ack, err(e?.message ?? 'Location update failed', 'ERROR'))
+    }
+  })
+
+  socket.on(EVT.VIEW_ONCE, async (payload: { conversationId: string; messageId: string }, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const { conversationId, messageId } = payload || {}
+
+    if (!conversationId || !messageId) {
+      return safeAck(ack, err('conversationId and messageId are required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+      // Soft-delete the message for everyone: view-once content must not persist
+      const deleted = await deps.messagesService.deleteMessage({
+        senderId: principal.userId,
+        conversationId,
+        messageId,
+      })
+
+      // Broadcast the deletion so all recipients clear it immediately
+      safeEmit(server, rooms.convRoom(conversationId), EVT.DELETE, deleted ?? { conversationId, messageId })
+
+      safeAck(ack, ok({ viewed: true }))
+    } catch (e: any) {
+      safeAck(ack, err(e?.message ?? 'View-once acknowledgement failed', 'ERROR'))
+    }
+  })
+
   socket.on(EVT.HISTORY, async (payload: HistoryPayload, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
 

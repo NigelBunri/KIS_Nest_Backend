@@ -12,6 +12,8 @@ import { registerCallHandlers, type CallsDeps } from './calls'
 import { registerPinHandlers, type PinsDeps } from './pins'
 import { registerLiveHandlers, type LiveDeps } from './live'
 
+const HANDLERS_REGISTERED_KEY = 'kisRealtimeHandlersRegistered'
+
 /**
  * Aggregate dependency type for all realtime handlers
  */
@@ -36,6 +38,11 @@ export function registerRealtimeHandlers(
   socket: Socket,
   deps: HandlersDeps,
 ) {
+  if ((socket.data as Record<string, unknown>)[HANDLERS_REGISTERED_KEY]) {
+    return
+  }
+  socket.data[HANDLERS_REGISTERED_KEY] = true
+
   registerRoomHandlers(server, socket, deps)
   registerMessageHandlers(server, socket, deps)
   registerReactionHandlers(server, socket, deps)

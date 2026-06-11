@@ -26,6 +26,11 @@ export interface PinsDeps {
       messageId: string
       starred: boolean
     }): Promise<{ starred: boolean }>
+    listStarredMessageIds(args: {
+      userId: string
+      conversationId: string
+      limit?: number
+    }): Promise<{ messageIds: string[] }>
   }
 }
 
@@ -88,6 +93,27 @@ export function registerPinHandlers(server: Server, socket: Socket, deps: PinsDe
       safeAck(ack, ok({ starred }))
     } catch (e: any) {
       safeAck(ack, err(e?.message ?? 'Star set failed', 'ERROR'))
+    }
+  })
+
+  socket.on(EVT.GET_STARRED, async (payload: { conversationId: string; limit?: number }, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const { conversationId, limit } = payload || {}
+
+    if (!conversationId) {
+      return safeAck(ack, err('conversationId is required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const { messageIds } = await deps.starsService.listStarredMessageIds({
+        userId: principal.userId,
+        conversationId,
+        limit,
+      })
+      safeAck(ack, ok({ messageIds }))
+    } catch (e: any) {
+      safeAck(ack, err(e?.message ?? 'Get starred failed', 'ERROR'))
     }
   })
 }

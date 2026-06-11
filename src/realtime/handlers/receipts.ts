@@ -10,6 +10,7 @@ export interface ReceiptsDeps {
   }
   djangoConversationClient: {
     assertMember(principal: SocketPrincipal, conversationId: string): Promise<any>
+    listMemberIds?(conversationId: string): Promise<string[]>
     updateReadState?(args: {
       conversationId: string
       userId: string
@@ -90,12 +91,16 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
       // Emit a receipt notification — NOT the full message document.
       // Frontend onReceipt expects {conversationId, messageId, type} to update
       // message status (single-tick → double-tick → blue double-tick).
+      const memberIds = deps.djangoConversationClient.listMemberIds
+        ? await deps.djangoConversationClient.listMemberIds(conversationId).catch(() => [])
+        : []
       safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_RECEIPT, {
         conversationId,
         messageId,
         type,
         userId: principal.userId,
         at: Date.now(),
+        totalParticipants: memberIds.length || undefined,
       })
       safeAck(ack, ok({ receipt: true }))
     } catch (e: any) {
@@ -121,6 +126,11 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
           action: 'receipt',
         })
       }
+
+      const batchMemberIds = deps.djangoConversationClient.listMemberIds
+        ? await deps.djangoConversationClient.listMemberIds(conversationId).catch(() => [])
+        : []
+      const batchMemberCount = batchMemberIds.length
 
       let lastSeq = 0
       let lastReadAt: string | null = null
@@ -152,6 +162,7 @@ export function registerReceiptHandlers(server: Server, socket: Socket, deps: Re
           type: 'read',
           userId: principal.userId,
           at: Date.now(),
+          totalParticipants: batchMemberCount || undefined,
         })
       }
 

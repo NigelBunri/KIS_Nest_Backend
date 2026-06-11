@@ -25,6 +25,16 @@ class Attachment {
   @Prop({ min: 0 }) height?: number;
   @Prop({ min: 0 }) durationMs?: number;
   @Prop() thumbUrl?: string;
+
+  /** UTC timestamp when the S3 file will be / has been deleted (10 days after upload). */
+  @Prop({ type: Date }) expiresAt?: Date;
+  /** Set to true after the S3 file has been deleted by the cleanup job. */
+  @Prop({ default: false }) expired?: boolean;
+
+  /** View-once: recipient can view this media exactly once before it auto-deletes */
+  @Prop({ default: false }) viewOnce?: boolean;
+  /** ISO timestamp when the recipient first opened this view-once attachment */
+  @Prop() viewedAt?: string;
 }
 const AttachmentSchema = SchemaFactory.createForClass(Attachment);
 
@@ -95,6 +105,25 @@ class EventPayload {
 }
 const EventPayloadSchema = SchemaFactory.createForClass(EventPayload);
 
+@Schema({ _id: false })
+class LocationCoords {
+  @Prop({ required: true }) latitude!: number;
+  @Prop({ required: true }) longitude!: number;
+  @Prop() address?: string;
+  @Prop() title?: string;
+}
+const LocationCoordsSchema = SchemaFactory.createForClass(LocationCoords);
+
+@Schema({ _id: false })
+class LinkPreview {
+  @Prop() url?: string;
+  @Prop() title?: string;
+  @Prop() description?: string;
+  @Prop() image?: string;
+  @Prop() site_name?: string;
+}
+const LinkPreviewSchema = SchemaFactory.createForClass(LinkPreview);
+
 /* ============================================================================
  * LEGACY TYPES (needed by receipts/reactions/sync)
  * ============================================================================
@@ -139,7 +168,8 @@ export type MessageKind =
   | 'system'
   | 'contacts'
   | 'poll'
-  | 'event';
+  | 'event'
+  | 'location';
 
 @Schema({ timestamps: true })
 export class Message {
@@ -159,7 +189,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location'],
   })
   kind!: MessageKind;
 
@@ -195,6 +225,12 @@ export class Message {
 
   @Prop({ type: EventPayloadSchema })
   event?: EventPayload;
+
+  @Prop({ type: LocationCoordsSchema })
+  location?: LocationCoords;
+
+  @Prop({ type: LinkPreviewSchema })
+  linkPreview?: LinkPreview;
 
   @Prop()
   replyToId?: string;

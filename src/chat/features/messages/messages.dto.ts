@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -115,6 +116,25 @@ export class EventDto {
   reminderMinutes?: number;
 }
 
+export class LocationDto {
+  @IsNumber() latitude!: number;
+  @IsNumber() longitude!: number;
+
+  @IsOptional() @IsString()
+  address?: string;
+
+  @IsOptional() @IsString()
+  title?: string;
+}
+
+export class LinkPreviewDto {
+  @IsOptional() @IsString() url?: string;
+  @IsOptional() @IsString() title?: string;
+  @IsOptional() @IsString() description?: string;
+  @IsOptional() @IsString() image?: string;
+  @IsOptional() @IsString() site_name?: string;
+}
+
 export class SendMessageDto {
   @IsString() conversationId!: string;
   @IsString() clientId!: string;
@@ -199,6 +219,16 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => EventDto)
   event?: EventDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LocationDto)
+  location?: LocationDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LinkPreviewDto)
+  linkPreview?: LinkPreviewDto;
 
   @IsOptional() @IsString()
   replyToId?: string;

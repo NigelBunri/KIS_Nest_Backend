@@ -92,6 +92,9 @@ export class SendMessageDto {
   event?: unknown;
 
   @IsOptional()
+  location?: unknown;
+
+  @IsOptional()
   replyToId?: string;
 
   @IsOptional()

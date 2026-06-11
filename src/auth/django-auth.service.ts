@@ -107,12 +107,14 @@ export class DjangoAuthService {
       throw new UnauthorizedException('Invalid token payload');
     }
 
-    const username = String(
-      data?.display_name ??
-        data?.username ??
-        (data?.email ? data.email.split('@')[0] : '') ??
-        'user',
-    );
+    const username =
+      [
+        data?.display_name,
+        data?.username,
+        data?.email ? data.email.split('@')[0] : '',
+      ]
+        .map((value) => String(value ?? '').trim())
+        .find(Boolean) ?? 'User';
 
     const isPremium = Boolean(
       data?.isPremium ??
@@ -210,12 +212,14 @@ export class DjangoAuthService {
       throw new UnauthorizedException('Token payload missing user id');
     }
 
-    const username = String(
-      payload?.display_name ??
-        payload?.username ??
-        (payload?.email ? (payload.email as string).split('@')[0] : '') ??
-        'user',
-    );
+    const username =
+      [
+        payload?.display_name,
+        payload?.username,
+        payload?.email ? (payload.email as string).split('@')[0] : '',
+      ]
+        .map((value) => String(value ?? '').trim())
+        .find(Boolean) ?? 'User';
 
     const isPremium = Boolean(
       payload?.isPremium ??

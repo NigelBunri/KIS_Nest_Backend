@@ -3,6 +3,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   NoSuchKey,
   PutObjectCommand,
@@ -61,6 +62,10 @@ export class S3StorageService extends StorageService {
       mime: file.mime || 'application/octet-stream',
       size: file.size,
     };
+  }
+
+  async deleteFile(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   async getFile(key: string): Promise<StoredFileStream> {

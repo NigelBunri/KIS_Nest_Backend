@@ -1,7 +1,7 @@
 // src/storage/local-storage.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { StorageService, StoredFile, StoredFileStream } from './storage.service';
-import { createReadStream, createWriteStream, existsSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, unlinkSync } from 'fs';
 import { join, normalize, resolve } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -26,6 +26,13 @@ export class LocalStorageService extends StorageService {
       throw new Error('Invalid upload key.');
     }
     return absolute;
+  }
+
+  async deleteFile(key: string): Promise<void> {
+    try {
+      const absolutePath = this.pathForKey(key);
+      if (existsSync(absolutePath)) unlinkSync(absolutePath);
+    } catch { /* ignore */ }
   }
 
   async getFile(key: string): Promise<StoredFileStream> {
@@ -68,7 +75,7 @@ export class LocalStorageService extends StorageService {
       'http://localhost:4000/uploads';
     return {
       key,
-      url: `${base}/${encodeURIComponent(key)}`,
+      url: `${base}/${key.split('/').map(encodeURIComponent).join('/')}`,
       name: file.filename,
       mime: file.mime || 'application/octet-stream',
       size: file.size,
