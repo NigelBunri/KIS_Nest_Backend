@@ -30,7 +30,9 @@ export class PresenceService {
     const redis = this.getRedis();
     if (redis) {
       try {
-        await redis.incr(`presence:${userId}:count`);
+        const key = `presence:${userId}:count`;
+        await redis.incr(key);
+        await redis.expire(key, 300); // 5-minute TTL; refreshed on each connection event
         return;
       } catch {
         // fall through to in-memory on redis failure
@@ -77,5 +79,19 @@ export class PresenceService {
     }
 
     return (this.counts.get(userId) ?? 0) > 0;
+  }
+
+  async getLastSeen(userId: string): Promise<number | null> {
+    const redis = this.getRedis();
+    if (redis) {
+      try {
+        const raw = await redis.get(`presence:${userId}:lastSeen`);
+        return raw ? Number(raw) : null;
+      } catch {
+        // fall through to in-memory on redis failure
+      }
+    }
+
+    return this.lastSeen.get(userId) ?? null;
   }
 }

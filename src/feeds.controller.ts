@@ -1,9 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
+  ForbiddenException,
+  Get,
   NotFoundException,
   Param,
   Post,
+  Query,
   Req,
   UnauthorizedException,
   UseGuards,
@@ -65,6 +69,18 @@ export class FeedsController {
     private readonly messagesService: MessagesService,
   ) {}
 
+  @Get()
+  @Scopes('broadcast:read')
+  async list(@Query('cursor') cursor: string | undefined, @Query('limit') limit: string | undefined, @Req() req: FastifyRequest) {
+    const tenantId = resolveTenantId(req)
+    const posts = await this.feedsService.findAll(tenantId, {
+      limit: limit ? Number(limit) : 20,
+      cursor,
+    })
+    const nextCursor = posts.length > 0 ? posts[posts.length - 1]._id.toString() : null
+    return { results: posts, next_cursor: nextCursor }
+  }
+
   @Post()
   @Scopes('broadcast:write')
   async create(@Body() body: CreateFeedPostDto, @Req() req: FastifyRequest) {
@@ -82,6 +98,17 @@ export class FeedsController {
       partnerProfileId: body.partnerProfileId,
     })
     return post
+  }
+
+  @Delete(':id')
+  @Scopes('broadcast:write')
+  async remove(@Param('id') id: string, @Req() req: FastifyRequest) {
+    const tenantId = resolveTenantId(req)
+    const principal = getRequestPrincipal(req)
+    if (!principal?.userId) throw new UnauthorizedException('missing principal')
+    const deleted = await this.feedsService.delete(tenantId, id, principal.userId)
+    if (!deleted) throw new ForbiddenException('not found or not your post')
+    return { deleted: true }
   }
 
   @Post(':id/broadcast')
