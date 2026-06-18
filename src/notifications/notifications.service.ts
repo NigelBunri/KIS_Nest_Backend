@@ -1,9 +1,22 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DeviceTokensService } from './device-tokens.service';
+import { DjangoUserPrefsClient } from './django-user-prefs.client';
 import { createFcmProvider } from './fcm.provider';
 import { DummyPushProvider, PushMessage, PushProvider } from './push.provider';
 
 export type PushTarget = { userId: string; deviceTokens?: string[] };
+
+function isInQuietHours(dnd: { start?: string; end?: string }): boolean {
+  const now = new Date()
+  const hhmm = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`
+  const { start, end } = dnd
+  if (!start || !end) return false
+  // Handle overnight ranges (e.g. 22:00 → 07:00)
+  if (start <= end) {
+    return hhmm >= start && hhmm <= end
+  }
+  return hhmm >= start || hhmm <= end
+}
 
 @Injectable()
 export class NotificationsService implements OnModuleInit {
@@ -12,6 +25,7 @@ export class NotificationsService implements OnModuleInit {
 
   constructor(
     private readonly tokens: DeviceTokensService,
+    private readonly userPrefsClient: DjangoUserPrefsClient,
   ) {
     const fcm = createFcmProvider();
     if (!fcm) {
@@ -52,6 +66,15 @@ export class NotificationsService implements OnModuleInit {
     conversationId: string;
     callId: string;
   }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs?.notif_calls === false) {
+      return { ok: true, delivered: 0, skipped: 'muted_category' };
+    }
+    const dnd = prefs?.dnd_quiet_hours;
+    if (dnd?.enabled && isInQuietHours(dnd)) {
+      return { ok: true, delivered: 0, skipped: 'dnd' };
+    }
+
     return this.notify(
       { userId: input.toUserId },
       {
@@ -70,6 +93,17 @@ export class NotificationsService implements OnModuleInit {
     senderName?: string;
     senderId?: string;
   }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs) {
+      if (prefs.notif_messages === false) {
+        return { ok: true, delivered: 0, skipped: 'muted_category' };
+      }
+      const dnd = prefs.dnd_quiet_hours;
+      if (dnd?.enabled && isInQuietHours(dnd)) {
+        return { ok: true, delivered: 0, skipped: 'dnd' };
+      }
+    }
+
     const title = (input.senderName && String(input.senderName).trim()) || 'New message';
     const body = input.preview ?? 'New message';
     return this.notify(
@@ -93,6 +127,15 @@ export class NotificationsService implements OnModuleInit {
     statusId: string;
     preview?: string;
   }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs?.notif_feed === false) {
+      return { ok: true, delivered: 0, skipped: 'muted_category' };
+    }
+    const dnd = prefs?.dnd_quiet_hours;
+    if (dnd?.enabled && isInQuietHours(dnd)) {
+      return { ok: true, delivered: 0, skipped: 'dnd' };
+    }
+
     const title = input.authorName ? `${input.authorName} posted a status` : 'New status update';
     return this.notify(
       { userId: input.toUserId },
@@ -111,6 +154,15 @@ export class NotificationsService implements OnModuleInit {
     providerName?: string;
     scheduledAt?: string;
   }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs?.notif_health === false) {
+      return { ok: true, delivered: 0, skipped: 'muted_category' };
+    }
+    const dnd = prefs?.dnd_quiet_hours;
+    if (dnd?.enabled && isInQuietHours(dnd)) {
+      return { ok: true, delivered: 0, skipped: 'dnd' };
+    }
+
     const titles: Record<string, string> = {
       confirmed: 'Booking confirmed',
       cancelled: 'Booking cancelled',

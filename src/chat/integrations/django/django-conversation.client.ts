@@ -392,6 +392,104 @@ export class DjangoConversationClient {
     return res?.data ?? { delivered: 0 };
   }
 
+  /**
+   * Update group/conversation settings (name, description, icon) via Django.
+   *
+   * Django endpoint:
+   *   PATCH /api/v1/chat/conversations/{conversationId}/settings/
+   */
+  async updateSettings(args: {
+    conversationId: string
+    settings: { name?: string; description?: string; icon?: string }
+    token?: string
+  }): Promise<Record<string, unknown>> {
+    const base = this.djangoApiBase()
+    const url = base
+      ? `${base}/chat/conversations/${args.conversationId}/settings/`
+      : undefined
+    if (!url) return {}
+
+    const body: Record<string, unknown> = {}
+    if (args.settings.name !== undefined) body.name = args.settings.name
+    if (args.settings.description !== undefined) body.description = args.settings.description
+    if (args.settings.icon !== undefined) body.icon = args.settings.icon
+
+    const headers: Record<string, string> = {
+      ...signedInternalHeaders({
+        method: 'PATCH',
+        url,
+        body,
+        secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+      }),
+    }
+    if (args.token) {
+      headers.Authorization = `Bearer ${args.token}`
+    }
+
+    const res = await firstValueFrom(
+      this.http.patch<Record<string, unknown>>(url, body, { headers }),
+    )
+    return res?.data ?? {}
+  }
+
+  /**
+   * Fetch device sessions for a user from Django.
+   *
+   * Django endpoint:
+   *   GET /api/v1/auth/devices/
+   */
+  async getDevices(token: string): Promise<unknown[]> {
+    const base = this.djangoApiBase()
+    const url = base ? `${base}/auth/devices/` : undefined
+    if (!url) return []
+
+    const headers: Record<string, string> = {
+      ...signedInternalHeaders({
+        method: 'GET',
+        url,
+        secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+      }),
+      Authorization: `Bearer ${token}`,
+    }
+
+    try {
+      const res = await firstValueFrom(
+        this.http.get<unknown[]>(url, { headers, timeout: 5000 }),
+      )
+      return Array.isArray(res?.data) ? res.data : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Revoke a device session via Django.
+   *
+   * Django endpoint:
+   *   DELETE /api/v1/auth/devices/{deviceId}/
+   */
+  async removeDevice(deviceId: string, token: string): Promise<{ removed: boolean }> {
+    const base = this.djangoApiBase()
+    const url = base ? `${base}/auth/devices/${encodeURIComponent(deviceId)}/` : undefined
+    if (!url) return { removed: false }
+
+    const headers: Record<string, string> = {
+      ...signedInternalHeaders({
+        method: 'DELETE',
+        url,
+        secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+      }),
+      Authorization: `Bearer ${token}`,
+    }
+
+    try {
+      await firstValueFrom(this.http.delete(url, { headers, timeout: 5000 }))
+      return { removed: true }
+    } catch {
+      return { removed: false }
+    }
+  }
+
   private buildBroadcastPerms(): DjangoWsPermsResponse {
     return { isMember: true, isBlocked: false, canSend: true };
   }

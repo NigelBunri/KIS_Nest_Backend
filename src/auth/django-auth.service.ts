@@ -32,6 +32,10 @@ export class DjangoAuthService {
   private readonly strictJwtClaims =
     ((process.env.DJANGO_JWT_STRICT ?? process.env.JWT_STRICT ?? '').trim() ||
       (process.env.NODE_ENV === 'production' ? '1' : '0')) === '1';
+  private readonly preferLocalJwt =
+    (process.env.DJANGO_LOCAL_JWT_FIRST ?? '').trim() === '1' ||
+    ((process.env.NODE_ENV ?? 'development') !== 'production' &&
+      Boolean(this.sharedJwtSecret));
   private readonly tokenIssuers = this.buildAllowedValues([
     process.env.DJANGO_JWT_ISSUER,
     process.env.JWT_ISSUER,
@@ -44,6 +48,17 @@ export class DjangoAuthService {
   ]);
 
   async introspect(token: string): Promise<AuthPrincipal> {
+    if (this.preferLocalJwt) {
+      try {
+        return this.mapPayloadToPrincipal(this.decodeAndValidateJwt(token));
+      } catch (localError) {
+        console.warn(
+          '⚠️ Local JWT verification failed; trying Django introspection',
+          localError,
+        );
+      }
+    }
+
     const rawUrl = process.env.DJANGO_INTROSPECT_URL;
     if (!rawUrl) {
       throw new UnauthorizedException('DJANGO_INTROSPECT_URL is missing');
@@ -81,7 +96,7 @@ export class DjangoAuthService {
         token: redact(token),
       });
 
-      if (this.sharedJwtSecret) {
+      if (this.sharedJwtSecret && !this.preferLocalJwt) {
         try {
           const payload = this.decodeAndValidateJwt(token);
           console.warn('⚠️ Falling back to local JWT verification', {
@@ -167,7 +182,11 @@ export class DjangoAuthService {
       throw new Error('Token not active yet');
     }
     if (this.tokenIssuers.length > 0) {
-      const issuerOk = this.tokenIssuers.includes(String(decoded.iss ?? ''));
+      const tokenIssuer = decoded.iss;
+      const issuerOk =
+        !this.strictJwtClaims && tokenIssuer == null
+          ? true
+          : this.tokenIssuers.includes(String(tokenIssuer ?? ''));
       if (!issuerOk) {
         const error = new Error('Invalid token issuer');
         if (this.strictJwtClaims) throw error;
@@ -179,9 +198,12 @@ export class DjangoAuthService {
     }
     if (this.tokenAudiences.length > 0) {
       const audClaim = decoded.aud;
-      const validAudience = Array.isArray(audClaim)
-        ? audClaim.some((aud) => this.tokenAudiences.includes(String(aud)))
-        : this.tokenAudiences.includes(String(audClaim ?? ''));
+      const validAudience =
+        !this.strictJwtClaims && audClaim == null
+          ? true
+          : Array.isArray(audClaim)
+            ? audClaim.some((aud) => this.tokenAudiences.includes(String(aud)))
+            : this.tokenAudiences.includes(String(audClaim ?? ''));
       if (!validAudience) {
         const error = new Error('Invalid token audience');
         if (this.strictJwtClaims) throw error;

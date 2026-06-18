@@ -41,6 +41,33 @@ export class ThreadsService {
     }
   }
 
+  async renameThread(input: {
+    threadId: string;
+    title: string;
+    requestedByUserId: string;
+  }): Promise<{ id: string; conversationId: string; title: string }> {
+    const { threadId, title } = input;
+    if (!threadId || !title) {
+      throw new BadRequestException('threadId and title are required');
+    }
+
+    const updated = await this.threadModel.findByIdAndUpdate(
+      threadId,
+      { $set: { title } },
+      { new: true },
+    );
+
+    if (!updated) {
+      throw new BadRequestException(`Thread ${threadId} not found`);
+    }
+
+    return {
+      id: String(updated._id),
+      conversationId: updated.conversationId,
+      title: updated.title ?? title,
+    };
+  }
+
   async listThreads(input: {
     conversationId: string;
     limit?: number;

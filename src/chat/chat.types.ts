@@ -89,6 +89,7 @@ export const EVT = {
   RECEIPT: 'chat.receipt',
   MESSAGE_RECEIPT: 'chat.message_receipt',
   CONVERSATION_UPDATED: 'conversation.updated',
+  CONVERSATION_LAST_MESSAGE: 'conversation.last_message',
   MAIN_TAB_BADGES_UPDATED: 'main_tab_badges.updated',
 
   // typing
@@ -103,7 +104,9 @@ export const EVT = {
 
   // pins & stars
   PIN_SET: 'chat.pin_set',
+  MESSAGE_PINNED: 'chat.message_pinned',
   STAR_SET: 'chat.star_set',
+  STARRED_LIST: 'chat.starred_list',
 
   // calls — legacy signaling (1:1, keep for backwards compat)
   CALL_OFFER: 'call.offer',
@@ -166,6 +169,29 @@ export const EVT = {
   // GAP 5: multi-device session management
   USER_GET_DEVICES: 'user.get_devices',
   USER_REMOVE_DEVICE: 'user.remove_device',
+
+  // Disappearing messages
+  DISAPPEAR_SET: 'chat.disappear.set',
+  DISAPPEAR_UPDATE: 'chat.disappear.update',
+
+  // In-chat poll voting
+  VOTE_POLL: 'chat.vote_poll',
+  POLL_UPDATED: 'chat.poll_updated',
+
+  // Scheduled messages
+  SCHEDULED_DELIVERED: 'chat.scheduled_delivered',
+  SCHEDULE_CANCEL: 'chat.schedule_cancel',
+
+  // Subroom / thread management
+  SUBROOM_RENAME: 'subroom.rename',
+  SUBROOM_UPDATED: 'subroom.updated',
+
+  // Group settings
+  GROUP_UPDATE_SETTINGS: 'group.update_settings',
+
+  // Device management (server → client response events)
+  USER_DEVICES_LIST: 'user.devices_list',
+  USER_DEVICE_REMOVED: 'user.device_removed',
 } as const
 
 export type EventKey = (typeof EVT)[keyof typeof EVT]
@@ -290,6 +316,7 @@ export interface SendMessagePayload {
   threadId?: string
   replyTo?: string
   ephemeral?: boolean
+  scheduledAt?: string  // ISO 8601 — if present, message is queued not delivered immediately
 
   encrypted?: boolean
   ciphertext?: string
@@ -358,6 +385,25 @@ export interface HistoryPayload {
 /* =========================
  * Acknowledgements
  * ========================= */
+
+/* =========================
+ * Disappearing Messages
+ * ========================= */
+
+export interface DisappearPayload {
+  conversationId: string
+  ttlSeconds: number | null  // null = disabled
+}
+
+/* =========================
+ * Poll Voting
+ * ========================= */
+
+export interface VotePollPayload {
+  conversationId: string
+  messageId: string
+  optionId: string
+}
 
 export interface AckOk<T = any> {
   ok: true

@@ -201,6 +201,13 @@ export interface MessagesDeps {
       before?: string
       after?: string
     }): Promise<any[]>
+
+    votePoll(args: {
+      conversationId: string
+      messageId: string
+      optionId: string
+      userId: string
+    }): Promise<any>
   }
   e2eeKeysService: E2eeKeysService
   notificationsService?: {
@@ -315,6 +322,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         createdAt: created.createdAt.toISOString(),
       }
 
+      // Intercept scheduled messages — persist but do not broadcast yet
+      if (payload.scheduledAt) {
+        const scheduledDate = new Date(payload.scheduledAt)
+        const tenSecondsFromNow = new Date(Date.now() + 10_000)
+        if (!isNaN(scheduledDate.getTime()) && scheduledDate > tenSecondsFromNow) {
+          safeAck(ack, ok({ ack: { ...ackPayload, scheduled: true, scheduledAt: scheduledDate.toISOString() } }))
+          return
+        }
+      }
+
       // Broadcast first so clients see the new message immediately
       safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, createdDto)
       socket.emit(EVT.MESSAGE, createdDto)
@@ -344,7 +361,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
             return [] as string[]
           })
           for (const userId of memberIds) {
-            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, {
+            const convUpdatePayload = {
               event: EVT.CONVERSATION_UPDATED,
               reason: 'message_created',
               conversationId,
@@ -353,7 +370,10 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
               preview,
               lastMessageAt: created.createdAt.toISOString(),
               seq: created.seq,
-            })
+            }
+            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, convUpdatePayload)
+            // Also emit conversation.last_message so frontend last-message listeners fire
+            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_LAST_MESSAGE, convUpdatePayload)
             safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
               event: EVT.MAIN_TAB_BADGES_UPDATED,
               source: 'messages',
@@ -610,6 +630,27 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       safeAck(ack, ok({ viewed: true }))
     } catch (e: any) {
       safeAck(ack, err(e?.message ?? 'View-once acknowledgement failed', 'ERROR'))
+    }
+  })
+
+  socket.on(EVT.SCHEDULE_CANCEL, async (payload: { conversationId: string; messageId: string }, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const { conversationId, messageId } = payload || {}
+
+    if (!conversationId || !messageId) {
+      return safeAck(ack, err('conversationId and messageId are required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const deleted = await deps.messagesService.deleteMessage({
+        senderId: principal.userId,
+        conversationId,
+        messageId,
+      })
+      safeAck(ack, ok({ cancelled: true, messageId: (deleted as any)?._id?.toString() ?? messageId }))
+    } catch (e: any) {
+      safeAck(ack, err(e?.message ?? 'Schedule cancel failed', 'ERROR'))
     }
   })
 

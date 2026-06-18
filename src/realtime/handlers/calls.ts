@@ -613,6 +613,46 @@ function registerHostHandlers(server: Server, socket: Socket, deps: CallsDeps) {
   })
 }
 
+// ─── Screen sharing ───────────────────────────────────────────────────────────
+
+function registerScreenShareHandler(server: Server, socket: Socket, deps: CallsDeps) {
+  // call.screen_share — participant starts/stops sharing their screen
+  socket.on(EVT.CALL_SCREEN_SHARE, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const enabled = typeof p.enabled === 'boolean' ? p.enabled : null
+    const sdp = p.sdp ?? undefined
+
+    if (!conversationId || enabled === null) {
+      return safeAck(ack, err('conversationId and enabled are required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:screen_share', 20)
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+      // Broadcast to all other call participants in the conversation room
+      const broadcastPayload: Record<string, unknown> = {
+        conversationId,
+        userId: principal.userId,
+        enabled,
+        at: new Date().toISOString(),
+      }
+      if (sdp !== undefined) broadcastPayload.sdp = sdp
+
+      // Emit to the conv room; the sender's own socket is excluded automatically
+      // by broadcasting to server.to(room) rather than socket.broadcast.to(room)
+      // so all participants (including other devices of the same user) receive it.
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_SCREEN_SHARE, broadcastPayload)
+      safeAck(ack, ok({ delivered: true }))
+    } catch (error: any) {
+      logger.error(`[calls] call.screen_share failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Screen share failed', 'ERROR'))
+    }
+  })
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 export function registerCallHandlers(server: Server, socket: Socket, deps: CallsDeps) {
@@ -630,4 +670,7 @@ export function registerCallHandlers(server: Server, socket: Socket, deps: Calls
 
   // Host moderation controls
   registerHostHandlers(server, socket, deps)
+
+  // Screen sharing
+  registerScreenShareHandler(server, socket, deps)
 }

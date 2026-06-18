@@ -28,6 +28,7 @@ import { PresenceService } from '../chat/features/presence/presence.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PinsService } from '../chat/features/pins/pins.service';
 import { StarsService } from '../chat/features/stars/stars.service';
+import { ThreadsService } from '../chat/features/threads/threads.service';
 import { registerRealtimeHandlers } from './handlers';
 import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
@@ -59,6 +60,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly e2eeKeysService: E2eeKeysService,
     private readonly pinsService: PinsService,
     private readonly starsService: StarsService,
+    private readonly threadsService: ThreadsService,
   ) {}
 
   async handleConnection(@ConnectedSocket() socket: Socket) {
@@ -125,6 +127,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       e2eeKeysService: this.e2eeKeysService,
       pinsService: this.pinsService,
       starsService: this.starsService,
+      threadsService: this.threadsService,
     });
 
     // --- Emit readiness

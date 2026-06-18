@@ -1,6 +1,20 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose'
 import { Document, Types } from 'mongoose'
 
+@Schema({ _id: false })
+export class FeedComment {
+  @Prop({ required: true })
+  userId!: string
+
+  @Prop({ required: true })
+  content!: string
+
+  @Prop({ default: () => new Date() })
+  createdAt!: Date
+}
+
+export const FeedCommentSchema = SchemaFactory.createForClass(FeedComment)
+
 @Schema({ timestamps: true, versionKey: false })
 export class FeedPost {
   @Prop({ required: true })
@@ -32,6 +46,12 @@ export class FeedPost {
 
   @Prop()
   deletedAt?: Date
+
+  @Prop({ type: [String], default: [] })
+  reactions!: string[]
+
+  @Prop({ type: [FeedCommentSchema], default: [] })
+  comments!: FeedComment[]
 }
 
 export type FeedPostDocument = FeedPost & Document<Types.ObjectId>

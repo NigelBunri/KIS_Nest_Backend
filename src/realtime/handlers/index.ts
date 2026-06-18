@@ -11,6 +11,9 @@ import { registerSyncHandlers, type SyncDeps } from './sync'
 import { registerCallHandlers, type CallsDeps } from './calls'
 import { registerPinHandlers, type PinsDeps } from './pins'
 import { registerLiveHandlers, type LiveDeps } from './live'
+import { registerDisappearingHandlers, type DisappearingDeps } from './disappearing'
+import { registerPollHandlers, type PollsDeps } from './polls'
+import { registerGroupHandlers, type GroupsDeps } from './groups'
 
 const HANDLERS_REGISTERED_KEY = 'kisRealtimeHandlersRegistered'
 
@@ -27,6 +30,9 @@ export type HandlersDeps =
   & CallsDeps
   & PinsDeps
   & LiveDeps
+  & DisappearingDeps
+  & PollsDeps
+  & GroupsDeps
 
 /**
  * Register all realtime socket handlers on a connected socket
@@ -52,4 +58,7 @@ export function registerRealtimeHandlers(
   registerCallHandlers(server, socket, deps)
   registerPinHandlers(server, socket, deps)
   registerLiveHandlers(server, socket, deps)
+  registerDisappearingHandlers(server, socket, deps)
+  registerPollHandlers(server, socket, deps)
+  registerGroupHandlers(server, socket, deps)
 }

@@ -71,14 +71,21 @@ export class FeedsController {
 
   @Get()
   @Scopes('broadcast:read')
-  async list(@Query('cursor') cursor: string | undefined, @Query('limit') limit: string | undefined, @Req() req: FastifyRequest) {
+  async list(
+    @Query('cursor') cursor: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('vertical') _vertical: string | undefined,
+    @Req() req: FastifyRequest,
+  ) {
     const tenantId = resolveTenantId(req)
     const posts = await this.feedsService.findAll(tenantId, {
       limit: limit ? Number(limit) : 20,
       cursor,
     })
     const nextCursor = posts.length > 0 ? posts[posts.length - 1]._id.toString() : null
-    return { results: posts, next_cursor: nextCursor }
+    // Return both `next_cursor` (canonical) and `cursor` (legacy alias) so any
+    // client version can reliably detect whether more pages are available.
+    return { results: posts, next_cursor: nextCursor, cursor: nextCursor }
   }
 
   @Post()
@@ -109,6 +116,38 @@ export class FeedsController {
     const deleted = await this.feedsService.delete(tenantId, id, principal.userId)
     if (!deleted) throw new ForbiddenException('not found or not your post')
     return { deleted: true }
+  }
+
+  @Get(':id')
+  @Scopes('broadcast:read')
+  async getPost(@Param('id') id: string, @Req() req: FastifyRequest) {
+    const tenantId = resolveTenantId(req)
+    const post = await this.feedsService.getPost(tenantId, id)
+    if (!post) throw new NotFoundException('feed not found')
+    return post
+  }
+
+  @Post(':id/react')
+  @Scopes('broadcast:read')
+  async react(@Param('id') id: string, @Req() req: FastifyRequest) {
+    const tenantId = resolveTenantId(req)
+    const principal = getRequestPrincipal(req)
+    if (!principal?.userId) throw new UnauthorizedException('missing principal')
+    const post = await this.feedsService.toggleReaction(tenantId, id, principal.userId)
+    if (!post) throw new NotFoundException('feed not found')
+    return post
+  }
+
+  @Post(':id/comment')
+  @Scopes('broadcast:read')
+  async addComment(@Param('id') id: string, @Body() body: { content: string }, @Req() req: FastifyRequest) {
+    const tenantId = resolveTenantId(req)
+    const principal = getRequestPrincipal(req)
+    if (!principal?.userId) throw new UnauthorizedException('missing principal')
+    if (!body?.content) throw new NotFoundException('content is required')
+    const post = await this.feedsService.addComment(tenantId, id, principal.userId, body.content)
+    if (!post) throw new NotFoundException('feed not found')
+    return post
   }
 
   @Post(':id/broadcast')

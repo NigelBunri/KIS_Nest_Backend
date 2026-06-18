@@ -528,6 +528,50 @@ export class MessagesService {
     }
   }
 
+  /* ==========================================================================
+   * POLL VOTING
+   * ========================================================================== */
+
+  async votePoll(args: {
+    conversationId: string
+    messageId: string
+    optionId: string
+    userId: string
+  }): Promise<MessageDocument> {
+    const msg = await this.messageModel.findOne({
+      _id: args.messageId,
+      conversationId: args.conversationId,
+    })
+
+    if (!msg) throw new NotFoundException('message not found')
+    if ((msg as any).kind !== 'poll') throw new BadRequestException('message is not a poll')
+    if ((msg as any).isDeleted) throw new BadRequestException('cannot vote on deleted message')
+
+    const poll = (msg as any).poll
+    if (!poll || !Array.isArray(poll.options)) throw new BadRequestException('poll data missing')
+
+    // Remove existing vote from any option first (de-vote + re-vote support)
+    for (const opt of poll.options) {
+      if (Array.isArray(opt.voters)) {
+        opt.voters = opt.voters.filter((v: string) => v !== args.userId)
+        opt.votes = opt.voters.length
+      }
+    }
+
+    // Cast vote on the target option
+    const target = poll.options.find((o: any) => o.id === args.optionId)
+    if (!target) throw new BadRequestException(`option ${args.optionId} not found in poll`)
+    if (!Array.isArray(target.voters)) target.voters = []
+    if (!target.voters.includes(args.userId)) {
+      target.voters.push(args.userId)
+    }
+    target.votes = target.voters.length
+
+    ;(msg as any).markModified('poll')
+    await (msg as any).save()
+    return msg
+  }
+
   private normalizeAttachments(input: any): any[] | undefined {
     if (!Array.isArray(input) || !input.length) return undefined
 

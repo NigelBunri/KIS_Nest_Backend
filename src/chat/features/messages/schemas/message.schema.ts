@@ -77,6 +77,7 @@ class PollOption {
   @Prop({ required: true }) id!: string;
   @Prop({ required: true }) text!: string;
   @Prop({ min: 0 }) votes?: number;
+  @Prop({ type: [String], default: [] }) voters?: string[];
 }
 const PollOptionSchema = SchemaFactory.createForClass(PollOption);
 
@@ -286,6 +287,13 @@ export class Message {
   @Prop({ type: EphemeralSchema })
   ephemeral?: Ephemeral;
 
+  // Scheduled message fields
+  @Prop({ type: Date })
+  scheduledAt?: Date;
+
+  @Prop({ default: false })
+  scheduledDelivered!: boolean;
+
   @Prop()
   deleteState?: 'deleted_for_me' | 'deleted_for_everyone';
 
@@ -325,3 +333,6 @@ MessageSchema.index(
   { text: 'text', previewText: 'text' },
   { weights: { text: 10, previewText: 3 }, name: 'MessageTextSearch' },
 );
+
+// Scheduled message delivery poll
+MessageSchema.index({ scheduledAt: 1, scheduledDelivered: 1, isDeleted: 1 });

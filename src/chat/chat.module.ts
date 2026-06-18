@@ -55,6 +55,8 @@ import { NotificationsModule } from '../notifications/notifications.module'
 // ✅ Optional compact call history
 import { CallStateModule } from './features/calls/call-state.module'
 
+import { ScheduledMessagesModule } from './features/scheduled-messages/scheduled-messages.module'
+
 @Module({
   imports: [
     AuthModule,
@@ -78,6 +80,7 @@ import { CallStateModule } from './features/calls/call-state.module'
 
     NotificationsModule,
     CallStateModule,
+    ScheduledMessagesModule,
   ],
   controllers: [
     ModerationController,

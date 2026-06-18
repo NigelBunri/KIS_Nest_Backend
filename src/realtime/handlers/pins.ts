@@ -54,7 +54,8 @@ export function registerPinHandlers(server: Server, socket: Socket, deps: PinsDe
         pinned,
       })
 
-      safeEmit(server, rooms.convRoom(conversationId), EVT.PIN_SET, {
+      // Emit MESSAGE_PINNED ('chat.message_pinned') — the event the frontend listens to
+      safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE_PINNED, {
         messageId,
         pinned,
         conversationId,
@@ -111,6 +112,8 @@ export function registerPinHandlers(server: Server, socket: Socket, deps: PinsDe
         conversationId,
         limit,
       })
+      // Emit chat.starred_list so frontend listeners fire even without an ack callback
+      socket.emit(EVT.STARRED_LIST, { conversationId, messageIds })
       safeAck(ack, ok({ messageIds }))
     } catch (e: any) {
       safeAck(ack, err(e?.message ?? 'Get starred failed', 'ERROR'))

@@ -413,6 +413,40 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     return call?.participants ?? []
   }
 
+  /**
+   * Efficient DB count of missed calls for a user since a given date.
+   * Used by the notification badge endpoint.
+   */
+  async countMissedCallsSince(userId: string, since: Date): Promise<number> {
+    return this.calls.countDocuments({
+      status: 'missed',
+      startedAt: { $gte: since },
+      $or: [
+        { createdBy: userId },
+        { 'participants.userId': userId },
+      ],
+    })
+  }
+
+  /**
+   * Lightweight patch by callId (used by the POST /calls/history endpoint to
+   * stamp the client-reported ended_at when the server-side socket end was
+   * not received, e.g. due to a network drop).
+   *
+   * Only writes endedAt when the call is not already ended, to avoid
+   * overwriting the authoritative server-side value.
+   */
+  async patchCallById(
+    callId: string,
+    patch: Partial<{ endedAt: Date }>,
+  ): Promise<void> {
+    if (!callId || !patch.endedAt) return
+    await this.calls.updateOne(
+      { callId, status: { $ne: 'ended' } },
+      { $set: { endedAt: patch.endedAt, isActiveInConversation: false } },
+    )
+  }
+
   async cleanupStaleCalls(): Promise<void> {
     const now = new Date()
     const ringingCutoff = new Date(now.getTime() - 90_000)   // ringing > 90 s
