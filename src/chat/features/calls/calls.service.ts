@@ -626,23 +626,26 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
 
   async cleanupStaleCalls(): Promise<void> {
     const now = new Date()
-    const ringingCutoff = new Date(now.getTime() - 90_000)   // ringing > 90 s
-    const activeCutoff = new Date(now.getTime() - 120_000)   // active but all left > 120 s
+    const ringingCutoff  = new Date(now.getTime() -     90_000) // unanswered > 90 s → missed
+    const activeCutoff   = new Date(now.getTime() -    120_000) // all-left > 120 s → ended
+    const pendingCutoff  = new Date(now.getTime() - 86_400_000) // scheduled but never started > 24 h → missed
+    const durationCutoff = new Date(now.getTime() - 86_400_000) // active > 24 h → force-ended
 
-    // End calls stuck in ringing with no answer
+    // ── 1. Unanswered ringing calls → missed ─────────────────────────────────
     const staleRinging = await this.calls
-      .find({ status: 'ringing', startedAt: { $lt: ringingCutoff }, isActiveInConversation: true })
+      .find({ status: { $in: ['ringing'] }, startedAt: { $lt: ringingCutoff }, isActiveInConversation: true })
       .lean()
     for (const call of staleRinging) {
       await this.calls.updateOne(
-        { conversationId: call.conversationId, callId: call.callId },
+        { conversationId: call.conversationId, callId: call.callId, status: { $ne: 'missed' } },
         { $set: { status: 'missed', endedAt: now, isActiveInConversation: false } },
       )
       this.logger.log(`[calls] cleanup: ringing timeout callId=${call.callId}`)
-      // Notify every invited participant who never joined that they missed a call
       if (this._notificationsService) {
-        const notInvited = call.participants.filter(p => p.status === 'invited' || p.status === 'connecting')
-        for (const p of notInvited) {
+        const unanswered = call.participants.filter(
+          (p) => p.status === 'invited' || p.status === 'connecting',
+        )
+        for (const p of unanswered) {
           this._notificationsService.notifyMissedCall({
             toUserId: p.userId,
             fromUserId: call.createdBy,
@@ -654,13 +657,9 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // End active calls where all participants have left
+    // ── 2. Active calls where everyone left → ended ───────────────────────────
     const staleActive = await this.calls
-      .find({
-        status: 'active',
-        isActiveInConversation: true,
-        startedAt: { $lt: activeCutoff },
-      })
+      .find({ status: 'active', isActiveInConversation: true, startedAt: { $lt: activeCutoff } })
       .lean()
     for (const call of staleActive) {
       const anyStillIn = call.participants.some(
@@ -671,8 +670,32 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
           { conversationId: call.conversationId, callId: call.callId },
           { $set: { status: 'ended', endedAt: now, isActiveInConversation: false } },
         )
-        this.logger.log(`[calls] cleanup: no-participant timeout callId=${call.callId}`)
+        this.logger.log(`[calls] cleanup: abandoned call ended callId=${call.callId}`)
       }
+    }
+
+    // ── 3. Calls running > 24 h → force-ended (safety cap) ────────────────────
+    const tooLong = await this.calls
+      .find({ status: 'active', isActiveInConversation: true, startedAt: { $lt: durationCutoff } })
+      .lean()
+    for (const call of tooLong) {
+      await this.calls.updateOne(
+        { conversationId: call.conversationId, callId: call.callId },
+        { $set: { status: 'ended', endedAt: now, isActiveInConversation: false } },
+      )
+      this.logger.warn(`[calls] cleanup: 24-hour cap reached callId=${call.callId}`)
+    }
+
+    // ── 4. Pending/scheduled calls that are > 24 h old → missed ──────────────
+    const stalePending = await this.calls
+      .find({ status: 'pending', startedAt: { $lt: pendingCutoff }, isActiveInConversation: true })
+      .lean()
+    for (const call of stalePending) {
+      await this.calls.updateOne(
+        { conversationId: call.conversationId, callId: call.callId },
+        { $set: { status: 'missed', endedAt: now, isActiveInConversation: false } },
+      )
+      this.logger.log(`[calls] cleanup: pending call expired callId=${call.callId}`)
     }
   }
 }

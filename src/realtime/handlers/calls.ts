@@ -171,7 +171,18 @@ function createCallHandler(
         }
 
         if (event === EVT.CALL_ANSWER) {
-          await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+          const callToJoin = await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+          // Enforce participant caps. Broadcast is viewer-counted separately.
+          const MAX_PARTICIPANTS: Record<string, number> = {
+            voice: 2, video: 2, 'voice-group': 100, 'video-group': 32, broadcast: 1000,
+          }
+          const cap = MAX_PARTICIPANTS[callToJoin?.callType ?? 'voice'] ?? 2
+          const currentJoined = (callToJoin?.participants ?? []).filter(
+            (p: any) => p.status === 'joined' || p.status === 'connecting',
+          ).length
+          if (currentJoined >= cap) {
+            return safeAck(ack, err(`Call is full (max ${cap} participants)`, 'CALL_FULL'))
+          }
           const activatedCall = await deps.callsService.markActive?.(conversationId, callId)
           await deps.callsService.setParticipantStatus?.(
             conversationId,
