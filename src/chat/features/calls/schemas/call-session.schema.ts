@@ -3,7 +3,7 @@ import { Document, Types } from 'mongoose';
 
 export type CallSessionDocument = CallSession & Document;
 
-export type CallStatus = 'ringing' | 'active' | 'ended' | 'missed';
+export type CallStatus = 'ringing' | 'active' | 'ended' | 'missed' | 'pending';
 export type CallParticipantStatus =
   | 'invited'
   | 'connecting'
@@ -70,7 +70,7 @@ export class CallSession {
   @Prop({ type: String, required: true })
   createdBy!: string;
 
-  @Prop({ type: String, required: true, enum: ['ringing', 'active', 'ended', 'missed'], index: true })
+  @Prop({ type: String, required: true, enum: ['ringing', 'active', 'ended', 'missed', 'pending'], index: true })
   status!: CallStatus;
 
   @Prop({ type: Date, required: true, index: true })
@@ -102,6 +102,40 @@ export class CallSession {
   // used for “only one active call per conversation” gating
   @Prop({ type: Boolean, default: false, index: true })
   isActiveInConversation!: boolean;
+
+  // Standalone calls — not tied to an existing DM/group conversation
+  @Prop({ type: Boolean, default: false })
+  isStandalone!: boolean;
+
+  // Human-readable title for standalone/scheduled calls
+  @Prop({ type: String, default: null })
+  title!: string | null;
+
+  // Invite link token — unique random string for join-by-link flow
+  @Prop({ type: String, default: null, sparse: true })
+  inviteToken!: string | null;
+
+  // Scheduled start time (null = start immediately)
+  @Prop({ type: Date, default: null })
+  scheduledFor!: Date | null;
+
+  // Users currently knocking to join (broadcast/locked calls)
+  @Prop({ type: [String], default: [] })
+  knockingUserIds!: string[];
+
+  // Recording state
+  @Prop({ type: String, default: 'idle', enum: ['idle', 'recording', 'stopped'] })
+  recordingState!: 'idle' | 'recording' | 'stopped';
+
+  @Prop({ type: String, default: null })
+  recordingUrl!: string | null;
+
+  // RTMP streaming URL (for broadcast live-stream out)
+  @Prop({ type: String, default: null })
+  rtmpUrl!: string | null;
+
+  @Prop({ type: Boolean, default: false })
+  rtmpActive!: boolean;
 }
 
 export const CallSessionSchema = SchemaFactory.createForClass(CallSession);
@@ -114,6 +148,12 @@ CallSessionSchema.index(
 
 // Fast lookup
 CallSessionSchema.index({ conversationId: 1, callId: 1 }, { unique: true });
+
+// Unique invite token for join-by-link
+CallSessionSchema.index({ inviteToken: 1 }, { unique: true, sparse: true });
+
+// Scheduled call discovery
+CallSessionSchema.index({ scheduledFor: 1, status: 1 }, { sparse: true });
 
 // Cleanup / queries
 CallSessionSchema.index({ conversationId: 1, status: 1, startedAt: -1 });

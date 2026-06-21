@@ -56,6 +56,7 @@ import { NotificationsModule } from '../notifications/notifications.module'
 import { CallStateModule } from './features/calls/call-state.module'
 
 import { ScheduledMessagesModule } from './features/scheduled-messages/scheduled-messages.module'
+import { SfuModule } from '../realtime/sfu/sfu.module'
 
 @Module({
   imports: [
@@ -81,6 +82,7 @@ import { ScheduledMessagesModule } from './features/scheduled-messages/scheduled
     NotificationsModule,
     CallStateModule,
     ScheduledMessagesModule,
+    SfuModule,
   ],
   controllers: [
     ModerationController,

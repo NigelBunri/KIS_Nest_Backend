@@ -32,6 +32,7 @@ import { ThreadsService } from '../chat/features/threads/threads.service';
 import { registerRealtimeHandlers } from './handlers';
 import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
+import { SfuService } from './sfu/sfu.service';
 
 @WebSocketGateway({
   path: '/ws',
@@ -61,6 +62,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly pinsService: PinsService,
     private readonly starsService: StarsService,
     private readonly threadsService: ThreadsService,
+    private readonly sfuService: SfuService,
   ) {}
 
   async handleConnection(@ConnectedSocket() socket: Socket) {
@@ -128,6 +130,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       pinsService: this.pinsService,
       starsService: this.starsService,
       threadsService: this.threadsService,
+      sfuService: this.sfuService,
     });
 
     // --- Emit readiness

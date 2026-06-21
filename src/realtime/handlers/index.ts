@@ -14,11 +14,14 @@ import { registerLiveHandlers, type LiveDeps } from './live'
 import { registerDisappearingHandlers, type DisappearingDeps } from './disappearing'
 import { registerPollHandlers, type PollsDeps } from './polls'
 import { registerGroupHandlers, type GroupsDeps } from './groups'
+import { registerSfuHandlers, type SfuDeps } from './sfu'
 
 const HANDLERS_REGISTERED_KEY = 'kisRealtimeHandlersRegistered'
 
 /**
- * Aggregate dependency type for all realtime handlers
+ * Aggregate dependency type for all realtime handlers.
+ * CallsDeps now includes an optional notificationsService so the call handler
+ * can send incoming-call push notifications to offline/backgrounded recipients.
  */
 export type HandlersDeps =
   & RoomsDeps
@@ -33,6 +36,7 @@ export type HandlersDeps =
   & DisappearingDeps
   & PollsDeps
   & GroupsDeps
+  & SfuDeps
 
 /**
  * Register all realtime socket handlers on a connected socket
@@ -61,4 +65,5 @@ export function registerRealtimeHandlers(
   registerDisappearingHandlers(server, socket, deps)
   registerPollHandlers(server, socket, deps)
   registerGroupHandlers(server, socket, deps)
+  registerSfuHandlers(server, socket, { sfuService: deps.sfuService, djangoConversationClient: deps.djangoConversationClient, rateLimitService: deps.rateLimitService })
 }

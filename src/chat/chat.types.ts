@@ -114,6 +114,9 @@ export const EVT = {
   CALL_ICE: 'call.ice',
   CALL_END: 'call.end',
 
+  // Participant silently leaves without ending the call for others
+  CALL_LEAVE: 'call.leave',
+
   // calls — WebRTC peer-to-peer media negotiation (targeted relay)
   CALL_SDP_OFFER: 'call.sdp.offer',
   CALL_SDP_ANSWER: 'call.sdp.answer',
@@ -161,6 +164,71 @@ export const EVT = {
 
   // GAP 1: screen sharing in calls
   CALL_SCREEN_SHARE: 'call.screen_share',
+
+  // Knock/admit — participant knocks to join a locked/broadcast call
+  CALL_KNOCK: 'call.knock',
+  CALL_KNOCK_ADMITTED: 'call.knock.admitted',
+  CALL_KNOCK_DENIED: 'call.knock.denied',
+  CALL_KNOCK_REQUEST: 'call.knock.request',   // host receives this
+  CALL_KNOCK_ADMIT: 'call.knock.admit',        // host sends this
+  CALL_KNOCK_DENY: 'call.knock.deny',          // host sends this
+
+  // Co-host / role promotion
+  CALL_PROMOTE: 'call.promote',
+  CALL_ROLE_CHANGED: 'call.role.changed',
+
+  // Recording
+  CALL_RECORDING_START: 'call.recording.start',
+  CALL_RECORDING_STOP: 'call.recording.stop',
+  CALL_RECORDING_CHANGED: 'call.recording.changed',
+
+  // Live captions relay
+  CALL_CAPTION: 'call.caption',
+
+  // Polls in-call
+  CALL_POLL_CREATE: 'call.poll.create',
+  CALL_POLL_VOTE: 'call.poll.vote',
+  CALL_POLL_RESULTS: 'call.poll.results',
+  CALL_POLL_CLOSE: 'call.poll.close',
+
+  // Q&A mode
+  CALL_QUESTION_SUBMIT: 'call.question.submit',
+  CALL_QUESTION_DISMISS: 'call.question.dismiss',
+  CALL_QUESTION_ANSWERED: 'call.question.answered',
+  CALL_QA_UPDATED: 'call.qa.updated',
+
+  // Breakout rooms
+  CALL_BREAKOUT_CREATE: 'call.breakout.create',
+  CALL_BREAKOUT_ASSIGN: 'call.breakout.assign',
+  CALL_BREAKOUT_RETURN: 'call.breakout.return',
+  CALL_BREAKOUT_CLOSE: 'call.breakout.close',
+  CALL_BREAKOUT_UPDATED: 'call.breakout.updated',
+
+  // RTMP streaming
+  CALL_RTMP_START: 'call.rtmp.start',
+  CALL_RTMP_STOP: 'call.rtmp.stop',
+  CALL_RTMP_CHANGED: 'call.rtmp.changed',
+
+  // Join-before-host: waiting for the host to start
+  CALL_HOST_JOINED: 'call.host.joined',
+
+  // Whiteboard
+  CALL_WB_STROKE: 'call.wb.stroke',
+  CALL_WB_CLEAR: 'call.wb.clear',
+  CALL_WB_CURSOR: 'call.wb.cursor',
+  CALL_WB_UNDO: 'call.wb.undo',
+
+  // SFU signalling
+  SFU_JOIN: 'sfu.join',
+  SFU_TRANSPORT_CREATE: 'sfu.transport.create',
+  SFU_TRANSPORT_CONNECT: 'sfu.transport.connect',
+  SFU_PRODUCE: 'sfu.produce',
+  SFU_CONSUME: 'sfu.consume',
+  SFU_CONSUMER_RESUME: 'sfu.consumer.resume',
+  SFU_PRODUCER_NEW: 'sfu.producer.new',
+  SFU_PRODUCER_CLOSED: 'sfu.producer.closed',
+  SFU_PEER_JOINED: 'sfu.peer.joined',
+  SFU_PEER_LEFT: 'sfu.peer.left',
 
   // GAP 4: payment messages
   PAYMENT_ACCEPT: 'payment.accept',

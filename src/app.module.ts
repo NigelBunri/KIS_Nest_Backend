@@ -18,6 +18,7 @@ import { ObservabilityModule } from './observability/observability.module';
 import { HealthModule } from './health/health.module';
 import { BroadcastModule } from './broadcast.module';
 import { FeedsModule } from './feeds.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   controllers: [AppController],
@@ -66,6 +67,7 @@ import { FeedsModule } from './feeds.module';
     }),
 
     // ✅ cross-cutting
+    AuthModule,
     ObservabilityModule,
     HealthModule,
     BroadcastModule,

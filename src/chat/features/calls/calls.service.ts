@@ -3,6 +3,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common'
 import { InjectModel } from '@nestjs/mongoose'
 import { Model } from 'mongoose'
+import * as crypto from 'crypto'
 import {
   CallParticipant,
   CallParticipantStatus,
@@ -20,12 +21,38 @@ type UpsertCallArgs = {
   inviteeUserIds?: string[]
 }
 
+type StandaloneCallArgs = {
+  callId: string
+  createdBy: string
+  callType: string
+  title: string
+  scheduledFor?: Date | null
+  inviteeUserIds?: string[]
+}
+
+type NotificationsServiceRef = {
+  notifyMissedCall(input: {
+    toUserId: string
+    fromUserId: string
+    fromDisplayName?: string
+    conversationId: string
+    callId: string
+    callType?: string
+  }): Promise<any>
+}
+
 @Injectable()
 export class CallsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CallsService.name)
   private cleanupTimer?: NodeJS.Timeout
+  private _notificationsService?: NotificationsServiceRef
 
   constructor(@InjectModel(CallSession.name) private readonly calls: Model<CallSessionDocument>) {}
+
+  /** Injected lazily to avoid circular dependency. */
+  setNotificationsService(svc: NotificationsServiceRef) {
+    this._notificationsService = svc
+  }
 
   onModuleInit() {
     this.cleanupTimer = setInterval(() => {
@@ -447,6 +474,156 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     )
   }
 
+  /**
+   * Create a standalone call not tied to any existing conversation.
+   * Uses a virtual conversationId = `standalone:${callId}` so all existing
+   * socket routing (convRoom) still works without special-casing.
+   */
+  async createStandaloneCall(args: StandaloneCallArgs): Promise<CallSession & { inviteToken: string }> {
+    const inviteToken = crypto.randomBytes(16).toString('hex')
+    const conversationId = `standalone:${args.callId}`
+    const now = new Date()
+    const callType = args.callType ?? 'voice'
+    const legacyMedia = callType.startsWith('video') ? 'video' : 'voice'
+
+    const participants: CallParticipant[] = [
+      {
+        userId: args.createdBy,
+        status: 'connecting',
+        role: 'host',
+        invitedAt: now,
+        joinedAt: null,
+        leftAt: null,
+        reason: null,
+      },
+    ]
+
+    if (args.inviteeUserIds?.length) {
+      for (const uid of args.inviteeUserIds) {
+        if (uid === args.createdBy) continue
+        participants.push({
+          userId: uid,
+          status: 'invited',
+          role: null,
+          invitedAt: now,
+          joinedAt: null,
+          leftAt: null,
+          reason: null,
+        })
+      }
+    }
+
+    const doc = await this.calls.create({
+      conversationId,
+      callId: args.callId,
+      createdBy: args.createdBy,
+      status: args.scheduledFor && args.scheduledFor > now ? 'ringing' : 'ringing',
+      startedAt: now,
+      endedAt: null,
+      callType,
+      media: legacyMedia,
+      viewerCount: 0,
+      participants,
+      signals: [],
+      isActiveInConversation: !args.scheduledFor || args.scheduledFor <= now,
+      isStandalone: true,
+      title: args.title,
+      inviteToken,
+      scheduledFor: args.scheduledFor ?? null,
+      knockingUserIds: [],
+    })
+
+    return { ...doc.toObject(), inviteToken }
+  }
+
+  /** Resolve an invite token to its call session. */
+  async getCallByToken(token: string): Promise<CallSession | null> {
+    return this.calls.findOne({ inviteToken: token }).lean()
+  }
+
+  /** List upcoming scheduled calls for a user. */
+  async getScheduledCalls(userId: string): Promise<CallSession[]> {
+    const now = new Date()
+    return this.calls
+      .find({
+        scheduledFor: { $gt: now },
+        status: 'ringing',
+        $or: [{ createdBy: userId }, { 'participants.userId': userId }],
+      })
+      .sort({ scheduledFor: 1 })
+      .limit(50)
+      .lean()
+  }
+
+  /** Add a user to the knocking list; host will be notified via socket. */
+  async addKnocker(conversationId: string, callId: string, userId: string): Promise<void> {
+    await this.calls.updateOne(
+      { conversationId, callId },
+      { $addToSet: { knockingUserIds: userId } },
+    )
+  }
+
+  /** Remove a user from the knocking list (admitted or denied). */
+  async removeKnocker(conversationId: string, callId: string, userId: string): Promise<void> {
+    await this.calls.updateOne(
+      { conversationId, callId },
+      { $pull: { knockingUserIds: userId } },
+    )
+  }
+
+  /**
+   * Return TURN server credentials derived from environment variables.
+   * Format: { ice_servers: [{ urls, username, credential }] }
+   * Falls back to public STUN if no TURN env is configured.
+   */
+  getTurnCredentials(): { ice_servers: any[] } {
+    const turnUrl = process.env.TURN_URL
+    const turnUser = process.env.TURN_USERNAME
+    const turnCredential = process.env.TURN_CREDENTIAL
+
+    const servers: any[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+    ]
+
+    if (turnUrl && turnUser && turnCredential) {
+      servers.push({ urls: turnUrl, username: turnUser, credential: turnCredential })
+      // Also try the UDP variant for poor-network relay
+      const udpUrl = turnUrl.replace('turn:', 'turn:').replace('?transport=tcp', '?transport=udp')
+      if (udpUrl !== turnUrl) servers.push({ urls: udpUrl, username: turnUser, credential: turnCredential })
+    }
+
+    return { ice_servers: servers }
+  }
+
+  /** Update recording state and optional URL. */
+  async setRecordingState(
+    conversationId: string,
+    callId: string,
+    state: 'idle' | 'recording' | 'stopped',
+    url?: string,
+  ): Promise<void> {
+    const update: any = { recordingState: state }
+    if (url) update.recordingUrl = url
+    await this.calls.updateOne({ conversationId, callId }, { $set: update })
+  }
+
+  /** Start or stop RTMP streaming. */
+  async setRtmp(conversationId: string, callId: string, active: boolean, url?: string): Promise<void> {
+    const update: any = { rtmpActive: active }
+    if (url) update.rtmpUrl = url
+    await this.calls.updateOne({ conversationId, callId }, { $set: update })
+  }
+
+  /** Return participants who are waiting to join a pending scheduled call. */
+  async getWaitingParticipants(conversationId: string, callId: string): Promise<string[]> {
+    const call = await this.calls.findOne({ conversationId, callId }, { participants: 1 }).lean()
+    return (call?.participants ?? [])
+      .filter((p) => p.status === 'invited')
+      .map((p) => p.userId)
+  }
+
   async cleanupStaleCalls(): Promise<void> {
     const now = new Date()
     const ringingCutoff = new Date(now.getTime() - 90_000)   // ringing > 90 s
@@ -462,6 +639,19 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
         { $set: { status: 'missed', endedAt: now, isActiveInConversation: false } },
       )
       this.logger.log(`[calls] cleanup: ringing timeout callId=${call.callId}`)
+      // Notify every invited participant who never joined that they missed a call
+      if (this._notificationsService) {
+        const notInvited = call.participants.filter(p => p.status === 'invited' || p.status === 'connecting')
+        for (const p of notInvited) {
+          this._notificationsService.notifyMissedCall({
+            toUserId: p.userId,
+            fromUserId: call.createdBy,
+            conversationId: call.conversationId,
+            callId: call.callId,
+            callType: call.callType,
+          }).catch(() => {})
+        }
+      }
     }
 
     // End active calls where all participants have left

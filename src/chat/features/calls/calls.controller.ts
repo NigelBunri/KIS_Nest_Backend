@@ -3,6 +3,8 @@ import {
   Controller,
   Get,
   HttpCode,
+  NotFoundException,
+  Param,
   Post,
   Query,
   Req,
@@ -59,6 +61,101 @@ export class CallsController {
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 86_400_000)
     const count = await this.callsService.countMissedCallsSince(principal.userId, sinceDate)
     return { count }
+  }
+
+  /**
+   * GET /calls/ice-servers — return TURN/STUN credentials for WebRTC.
+   * Credentials are derived from server-side environment variables so they
+   * are never baked into the client bundle.
+   */
+  @Get('ice-servers')
+  async iceServers(@Req() req: FastifyRequest) {
+    await this.resolveUser(req)
+    return this.callsService.getTurnCredentials()
+  }
+
+  /**
+   * POST /calls/standalone — create a call that is NOT tied to an existing
+   * conversation.  Returns callId, conversationId, and an inviteToken that
+   * recipients can use to join via a deep link.
+   */
+  @Post('standalone')
+  async createStandalone(
+    @Req() req: FastifyRequest,
+    @Body()
+    body: {
+      call_id: string
+      call_type?: string
+      title?: string
+      scheduled_for?: string
+      invitee_user_ids?: string[]
+    },
+  ) {
+    const principal = await this.resolveUser(req)
+    if (!body.call_id) throw new NotFoundException('call_id required')
+
+    const scheduledFor = body.scheduled_for ? new Date(body.scheduled_for) : null
+
+    const call = await this.callsService.createStandaloneCall({
+      callId: body.call_id,
+      createdBy: principal.userId,
+      callType: body.call_type ?? 'voice',
+      title: body.title ?? 'Call',
+      scheduledFor,
+      inviteeUserIds: body.invitee_user_ids,
+    })
+
+    return {
+      callId: call.callId,
+      conversationId: call.conversationId,
+      inviteToken: call.inviteToken,
+      callType: call.callType,
+      title: call.title,
+      scheduledFor: call.scheduledFor,
+      isStandalone: call.isStandalone,
+    }
+  }
+
+  /**
+   * GET /calls/join/:token — resolve an invite token to call info so the
+   * client can join without knowing the conversationId up front.
+   */
+  @Get('join/:token')
+  async joinByToken(@Req() req: FastifyRequest, @Param('token') token: string) {
+    await this.resolveUser(req)
+    const call = await this.callsService.getCallByToken(token)
+    if (!call) throw new NotFoundException('Invite link not found or has expired')
+    return {
+      callId: call.callId,
+      conversationId: call.conversationId,
+      callType: call.callType,
+      title: call.title,
+      status: call.status,
+      isStandalone: call.isStandalone,
+      scheduledFor: call.scheduledFor,
+      participantCount: call.participants.length,
+    }
+  }
+
+  /**
+   * GET /calls/scheduled — list upcoming scheduled calls for the authenticated user.
+   */
+  @Get('scheduled')
+  async scheduled(@Req() req: FastifyRequest) {
+    const principal = await this.resolveUser(req)
+    const calls = await this.callsService.getScheduledCalls(principal.userId)
+    return {
+      calls: calls.map((c) => ({
+        callId: c.callId,
+        conversationId: c.conversationId,
+        callType: c.callType,
+        title: c.title,
+        scheduledFor: c.scheduledFor,
+        isStandalone: c.isStandalone,
+        inviteToken: c.inviteToken,
+        participantCount: c.participants.length,
+      })),
+    }
   }
 
   /**

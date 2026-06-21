@@ -63,8 +63,11 @@ export class NotificationsService implements OnModuleInit {
   async notifyIncomingCall(input: {
     toUserId: string;
     fromUserId: string;
+    fromDisplayName?: string
     conversationId: string;
     callId: string;
+    callType?: string;
+    title?: string;
   }) {
     const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
     if (prefs?.notif_calls === false) {
@@ -75,12 +78,50 @@ export class NotificationsService implements OnModuleInit {
       return { ok: true, delivered: 0, skipped: 'dnd' };
     }
 
+    const callerLabel = input.fromDisplayName || input.fromUserId;
+    const callLabel = input.title || (input.callType ? `${input.callType} call` : 'call');
+
     return this.notify(
       { userId: input.toUserId },
       {
-        title: 'Incoming call',
-        body: `Call from ${input.fromUserId}`,
-        data: { conversationId: input.conversationId, callId: input.callId, type: 'call' },
+        title: `Incoming ${callLabel}`,
+        body: `${callerLabel} is calling you`,
+        data: {
+          conversationId: input.conversationId,
+          callId: input.callId,
+          callType: input.callType ?? 'voice',
+          fromUserId: input.fromUserId,
+          type: 'incoming_call',
+        },
+      },
+    );
+  }
+
+  async notifyMissedCall(input: {
+    toUserId: string;
+    fromUserId: string;
+    fromDisplayName?: string;
+    conversationId: string;
+    callId: string;
+    callType?: string;
+  }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs?.notif_calls === false) {
+      return { ok: true, delivered: 0, skipped: 'muted_category' };
+    }
+
+    const callerLabel = input.fromDisplayName || input.fromUserId;
+    return this.notify(
+      { userId: input.toUserId },
+      {
+        title: 'Missed call',
+        body: `You missed a ${input.callType ?? 'voice'} call from ${callerLabel}`,
+        data: {
+          conversationId: input.conversationId,
+          callId: input.callId,
+          fromUserId: input.fromUserId,
+          type: 'missed_call',
+        },
       },
     );
   }
