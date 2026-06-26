@@ -140,8 +140,8 @@ export class UploadsController {
       throw new BadRequestException('A file key is required.');
     }
     const file = await this.storage.getFile(key);
-    const isS3Proxy = this.storage.driver() === 's3';
-    reply.header('cache-control', isS3Proxy ? 'public, max-age=31536000, immutable' : 'private, max-age=0, no-store');
+    const publicStorage = this.storage.isPublic();
+    reply.header('cache-control', publicStorage ? 'public, max-age=31536000, immutable' : 'private, max-age=0, no-store');
     reply.type(file.mime || 'application/octet-stream');
     if (file.size !== undefined) {
       reply.header('content-length', String(file.size));
@@ -268,16 +268,17 @@ export class UploadsController {
           ? 'videos'
           : undefined;
 
-    // When S3/Supabase is active, stored.url is the CDN public URL — use it
-    // directly so images load from the CDN without a NestJS proxy hop.
+    // Public S3 buckets can be displayed directly from S3/CDN. Private S3
+    // buckets must use the authenticated download endpoint so objects remain
+    // protected while still being streamed from S3 by the storage service.
     // For local-filesystem storage, always use the key-based download endpoint
     // for both display and download: @fastify/static does not decode %2F in
     // URL paths (security policy), so a static path like
     // /uploads/2026-06-09%2Fuuid.jpg returns 404. The ?key= query-param
     // endpoint is always safe because query params are decoded before lookup.
-    const isS3 = this.storage.driver() === 's3';
-    const primaryUrl = isS3 ? stored.url : authenticatedDownloadUrl;
-    const primaryPublicUrl = isS3 ? stored.url : undefined;
+    const publicStorage = this.storage.isPublic();
+    const primaryUrl = publicStorage ? stored.url : authenticatedDownloadUrl;
+    const primaryPublicUrl = publicStorage ? stored.url : undefined;
 
     // Files expire from S3 after 10 days. The cleanup job uses this field.
     const FILE_TTL_DAYS = Number(process.env.ATTACHMENT_TTL_DAYS || '10');
@@ -297,8 +298,8 @@ export class UploadsController {
       kind,
       expiresAt,
       expired: false,
-      visibility: (isS3 || publicUploadsEnabled) ? 'public' : 'private',
-      private: !isS3 && !publicUploadsEnabled,
+      visibility: (publicStorage || publicUploadsEnabled) ? 'public' : 'private',
+      private: !publicStorage && !publicUploadsEnabled,
       scanStatus: uploadScanStatus(),
       quarantined: uploadScanStatus() === 'pending',
     };

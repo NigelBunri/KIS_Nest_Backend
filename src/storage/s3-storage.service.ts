@@ -11,29 +11,42 @@ import {
 } from '@aws-sdk/client-s3';
 import { StorageService, StoredFile, StoredFileStream } from './storage.service';
 
-const requiredEnv = (name: string) => {
-  const value = String(process.env[name] || '').trim();
-  if (!value) throw new Error(`${name} is required for S3 uploads.`);
+const env = (...names: string[]) => {
+  for (const name of names) {
+    const value = String(process.env[name] || '').trim();
+    if (value) return value;
+  }
+  return '';
+};
+
+const requiredEnv = (...names: string[]) => {
+  const value = env(...names);
+  if (!value) throw new Error(`${names[0]} is required for S3 uploads.`);
   return value;
 };
 
 @Injectable()
 export class S3StorageService extends StorageService {
-  private readonly bucket = requiredEnv('SUPABASE_S3_BUCKET_NAME');
-  private readonly endpoint = requiredEnv('SUPABASE_S3_ENDPOINT_URL').replace(/\/+$/, '');
+  private readonly bucket = requiredEnv('AWS_STORAGE_BUCKET_NAME', 'AWS_S3_BUCKET_NAME', 'SUPABASE_S3_BUCKET_NAME');
+  private readonly endpoint = env('AWS_S3_ENDPOINT_URL', 'SUPABASE_S3_ENDPOINT_URL').replace(/\/+$/, '');
+  private readonly publicBucket = env('AWS_S3_PUBLIC_BUCKET') === '1' || env('AWS_S3_PUBLIC_BUCKET').toLowerCase() === 'true';
   private readonly publicBase = this.resolvePublicBase();
   private readonly client = new S3Client({
-    region: process.env.SUPABASE_S3_REGION_NAME || 'us-east-1',
-    endpoint: this.endpoint,
-    forcePathStyle: true,
+    region: env('AWS_S3_REGION_NAME', 'SUPABASE_S3_REGION_NAME') || 'eu-west-2',
+    endpoint: this.endpoint || undefined,
+    forcePathStyle: env('AWS_S3_FORCE_PATH_STYLE') === '1' || Boolean(this.endpoint),
     credentials: {
-      accessKeyId: requiredEnv('SUPABASE_S3_ACCESS_KEY_ID'),
-      secretAccessKey: requiredEnv('SUPABASE_S3_SECRET_ACCESS_KEY'),
+      accessKeyId: requiredEnv('AWS_ACCESS_KEY_ID', 'SUPABASE_S3_ACCESS_KEY_ID'),
+      secretAccessKey: requiredEnv('AWS_SECRET_ACCESS_KEY', 'SUPABASE_S3_SECRET_ACCESS_KEY'),
     },
   });
 
   driver(): 'local' | 's3' {
     return 's3';
+  }
+
+  isPublic(): boolean {
+    return this.publicBucket;
   }
 
   async storeLocal(file: {
@@ -94,11 +107,14 @@ export class S3StorageService extends StorageService {
   }
 
   private resolvePublicBase() {
-    const explicit = String(process.env.SUPABASE_S3_PUBLIC_URL || '').trim();
-    const base = explicit ||
-      (this.endpoint.endsWith('/s3')
-        ? `${this.endpoint.slice(0, -3)}/object/public`
-        : `${this.endpoint}/object/public`);
-    return `${base.replace(/\/+$/, '')}/${this.bucket}`;
+    const explicit = env('AWS_S3_PUBLIC_URL', 'SUPABASE_S3_PUBLIC_URL');
+    if (explicit) return explicit.replace(/\/+$/, '');
+    if (this.endpoint.endsWith('/s3')) {
+      return `${this.endpoint.slice(0, -3)}/object/public/${this.bucket}`;
+    }
+    if (this.endpoint) {
+      return `${this.endpoint}/object/public/${this.bucket}`;
+    }
+    return `https://${this.bucket}.s3.${env('AWS_S3_REGION_NAME', 'SUPABASE_S3_REGION_NAME') || 'eu-west-2'}.amazonaws.com`;
   }
 }

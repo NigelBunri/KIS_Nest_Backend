@@ -7,6 +7,9 @@ export type StoredFileStream = { body: Readable; mime?: string; size?: number; n
 
 export abstract class StorageService {
   abstract driver(): 'local' | 's3';
+  isPublic(): boolean {
+    return false;
+  }
   abstract storeLocal(file: {
     buffer: Buffer;
     filename: string;

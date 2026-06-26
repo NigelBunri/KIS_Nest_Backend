@@ -6,10 +6,9 @@ import { StorageService } from './storage.service';
 
 const hasS3Config = () =>
   Boolean(
-    process.env.SUPABASE_S3_ENDPOINT_URL &&
-      process.env.SUPABASE_S3_ACCESS_KEY_ID &&
-      process.env.SUPABASE_S3_SECRET_ACCESS_KEY &&
-      process.env.SUPABASE_S3_BUCKET_NAME,
+    (process.env.AWS_ACCESS_KEY_ID || process.env.SUPABASE_S3_ACCESS_KEY_ID) &&
+      (process.env.AWS_SECRET_ACCESS_KEY || process.env.SUPABASE_S3_SECRET_ACCESS_KEY) &&
+      (process.env.AWS_STORAGE_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.SUPABASE_S3_BUCKET_NAME),
   );
 
 @Module({
