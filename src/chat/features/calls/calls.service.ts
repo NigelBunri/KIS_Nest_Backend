@@ -118,16 +118,40 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     )
   }
 
+  getUserFacingStatus(call: any, userId: string): string {
+    if (call.status === 'active') return 'ongoing'
+    if (call.status === 'ringing') return 'ringing'
+    if (call.status === 'pending') return 'pending'
+
+    const participants = Array.isArray(call.participants) ? call.participants : []
+    const participant = participants.find((row: any) => String(row.userId) === String(userId))
+    const joined = Boolean(participant?.joinedAt)
+    if (participant?.status === 'busy') return 'busy'
+    if (participant?.status === 'rejected') return 'declined'
+    if (joined) return 'completed'
+
+    if (String(call.createdBy) === String(userId)) {
+      const anotherJoined = participants.some(
+        (row: any) => String(row.userId) !== String(userId) && Boolean(row.joinedAt),
+      )
+      return anotherJoined ? 'completed' : 'cancelled'
+    }
+    return 'missed'
+  }
+
   async listUserCalls(input: {
     userId: string
     limit?: number
     before?: string
   }): Promise<{ calls: any[] }> {
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 200)
+    // Coerce to string so the query matches regardless of whether the ID was
+    // stored as a number or string (socket vs REST auth may differ in type).
+    const uid = String(input.userId)
     const q: any = {
       $or: [
-        { createdBy: input.userId },
-        { 'participants.userId': input.userId },
+        { createdBy: uid },
+        { 'participants.userId': uid },
       ],
     }
     if (input.before) {
@@ -156,7 +180,9 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
           conversationId: r.conversationId,
           callId: r.callId,
           createdBy: r.createdBy,
-          status: r.status,
+          status: this.getUserFacingStatus(r, input.userId),
+          rawStatus: r.status,
+          userStatus: this.getUserFacingStatus(r, input.userId),
           callType: r.callType ?? r.media ?? 'voice',
           media: r.media,
           startedAt: r.startedAt?.toISOString?.() ?? String(r.startedAt),
@@ -164,6 +190,8 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
           duration: durationSeconds,
           participantCount: participants.length,
           participants,
+          title: r.title ?? null,
+          isStandalone: Boolean(r.isStandalone),
         }
       }),
     }
@@ -206,7 +234,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const participants: CallParticipant[] = []
 
     participants.push({
-      userId: args.createdBy,
+      userId: String(args.createdBy),
       status: 'connecting',
       role: 'host',
       invitedAt: now,
@@ -217,9 +245,9 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
 
     if (args.inviteeUserIds?.length) {
       for (const uid of args.inviteeUserIds) {
-        if (uid === args.createdBy) continue
+        if (String(uid) === String(args.createdBy)) continue
         participants.push({
-          userId: uid,
+          userId: String(uid),
           status: 'invited',
           role: null,
           invitedAt: now,
@@ -237,7 +265,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       const doc = await this.calls.create({
         conversationId: args.conversationId,
         callId: args.callId,
-        createdBy: args.createdBy,
+        createdBy: String(args.createdBy),
         status: 'ringing',
         startedAt: now,
         endedAt: null,
@@ -426,6 +454,23 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Return the active call (if any) for a specific conversation. */
+  async getActiveCall(conversationId: string): Promise<CallSession | null> {
+    return this.calls.findOne({ conversationId, isActiveInConversation: true }).lean()
+  }
+
+  /**
+   * Return recent calls for a specific conversation (for chat history display).
+   * Ordered newest-first, capped at limit.
+   */
+  async getCallsForConversation(conversationId: string, limit = 30): Promise<CallSession[]> {
+    return this.calls
+      .find({ conversationId })
+      .sort({ startedAt: -1 })
+      .limit(Math.min(limit, 100))
+      .lean()
+  }
+
   async getActiveCallsForUser(userId: string): Promise<CallSession[]> {
     return this.calls
       .find({
@@ -517,7 +562,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       conversationId,
       callId: args.callId,
       createdBy: args.createdBy,
-      status: args.scheduledFor && args.scheduledFor > now ? 'ringing' : 'ringing',
+      status: args.scheduledFor && args.scheduledFor > now ? 'pending' : 'ringing',
       startedAt: now,
       endedAt: null,
       callType,
@@ -539,6 +584,25 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
   /** Resolve an invite token to its call session. */
   async getCallByToken(token: string): Promise<CallSession | null> {
     return this.calls.findOne({ inviteToken: token }).lean()
+  }
+
+  /**
+   * Generate (or return an existing) invite token for any active call.
+   * Standalone calls already have one; for conversation-backed calls we create
+   * one on demand and persist it.
+   */
+  async getOrCreateInviteToken(conversationId: string, callId: string): Promise<string | null> {
+    const call = await this.calls.findOne({ conversationId, callId }).lean()
+    if (!call) return null
+    if (call.status === 'ended' || call.status === 'missed') return null
+    if (call.inviteToken) return call.inviteToken
+
+    const token = crypto.randomBytes(16).toString('hex')
+    await this.calls.updateOne(
+      { conversationId, callId, inviteToken: null },
+      { $set: { inviteToken: token } },
+    )
+    return token
   }
 
   /** List upcoming scheduled calls for a user. */

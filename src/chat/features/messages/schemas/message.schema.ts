@@ -170,9 +170,13 @@ export type MessageKind =
   | 'contacts'
   | 'poll'
   | 'event'
-  | 'location';
+  | 'location'
+  | 'call_event';
 
-@Schema({ timestamps: true })
+@Schema({
+  timestamps: true,
+  writeConcern: { w: 'majority', wtimeout: 10_000 },
+})
 export class Message {
   @Prop({ required: true, index: true })
   conversationId!: string;
@@ -190,9 +194,20 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event'],
   })
   kind!: MessageKind;
+
+  // Populated only when kind === 'call_event'
+  @Prop({ type: Object })
+  callEvent?: {
+    callId: string;
+    callType: string;
+    status: 'completed' | 'missed' | 'cancelled';
+    duration?: number | null; // seconds
+    participantCount?: number;
+    initiatedBy?: string;
+  };
 
   /* ----- Batch B: Threads wiring ----- */
   @Prop({ index: true })

@@ -15,6 +15,7 @@ export enum MessageKind {
   POLL = 'poll',
   EVENT = 'event',
   LOCATION = 'location',
+  CALL_EVENT = 'call_event',
 }
 
 /**
@@ -110,6 +111,7 @@ export const EVT = {
 
   // calls — legacy signaling (1:1, keep for backwards compat)
   CALL_OFFER: 'call.offer',
+  CALL_INVITE: 'call.invite',
   CALL_ANSWER: 'call.answer',
   CALL_ICE: 'call.ice',
   CALL_END: 'call.end',

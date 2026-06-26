@@ -667,7 +667,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     let stage = 'history.start'
     try {
       stage = 'history.rate_limit'
-      await deps.rateLimitService.assert(principal, `history:${conversationId}`, 30)
+      await deps.rateLimitService.assert(principal, `history:${conversationId}`, 120)
       stage = 'history.assert_member'
       await deps.djangoConversationClient.assertMember(principal, conversationId)
 

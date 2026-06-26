@@ -12,6 +12,9 @@ import {
   MaxLength,
   ArrayMaxSize,
   IsIn,
+  IsInt,
+  Min,
+  Max,
 } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { validate, type ValidationError } from 'class-validator';
@@ -171,6 +174,12 @@ export class HistoryDto {
   @IsString()
   @MaxLength(256)
   after?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  limit?: number;
 }
 
 export class ReactDto {

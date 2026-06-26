@@ -68,6 +68,8 @@ export class MessagesService {
 
       replyToId: input.replyToId,
 
+      callEvent: (input as any).callEvent,
+
       previewText,
     })
 
@@ -316,7 +318,7 @@ export class MessagesService {
   }
 
   async listRecent(args: { conversationId: string; limit?: number; before?: string; after?: string }): Promise<any[]> {
-    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200)
+    const limit = Math.min(Math.max(args.limit ?? 50, 1), 500)
     const query: any = { conversationId: args.conversationId }
     if (args.before) {
       const dt = new Date(args.before)
@@ -431,6 +433,7 @@ export class MessagesService {
       'event',
       'location',
       'system',
+      'call_event',
     ])
     if (!allowedKinds.has(kind)) throw new BadRequestException(`Unsupported kind: ${String(kind)}`)
     if (hasEncryptedPayload) return
@@ -479,6 +482,9 @@ export class MessagesService {
       case 'system':
         if (!hasText) throw new BadRequestException('system requires text')
         break
+      case 'call_event':
+        // No payload constraint — callEvent field is set directly on the doc.
+        break
     }
 
     if (kind !== 'styled_text' && hasStyled) throw new BadRequestException('styledText payload only allowed for styled_text kind')
@@ -523,6 +529,8 @@ export class MessagesService {
         return `📍 ${(input as any).location?.title ?? (input as any).location?.address ?? 'Location'}`
       case 'system':
         return input.text?.slice(0, 200)
+      case 'call_event':
+        return (input as any).callEvent?.status === 'missed' ? '📵 Missed call' : '📞 Call ended'
       default:
         return undefined
     }

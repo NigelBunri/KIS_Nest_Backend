@@ -30,6 +30,19 @@ export interface CallsDeps {
   rateLimitService?: {
     assert(principal: SocketPrincipal, key: string, limit?: number): Promise<void> | void
   }
+  djangoSeqClient?: {
+    allocateSeq(conversationId: string): Promise<number>
+    allocate?: (conversationId: string) => Promise<number>
+  }
+  messagesService?: {
+    createIdempotent(args: {
+      senderId: string
+      conversationId: string
+      clientId: string
+      seq: number
+      input: Record<string, any>
+    }): Promise<{ id: string; seq: number; createdAt: Date; dto: any }>
+  }
   notificationsService?: {
     notifyIncomingCall(input: {
       toUserId: string
@@ -130,7 +143,12 @@ function createCallHandler(
 
     try {
       await deps.rateLimitService?.assert(principal, `call:${event}`, 20)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      // Standalone calls use a synthetic conversationId (`standalone:<callId>`).
+      // They have no Django conversation record, so skip membership check and
+      // instead verify the caller is the creator (checked via callsService below).
+      if (!conversationId.startsWith('standalone:')) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
 
       const callId = typeof payload?.callId === 'string' ? payload.callId : undefined
       const enrichedPayload: Record<string, unknown> = {
@@ -278,10 +296,115 @@ function createCallHandler(
               viewerCount: count,
             })
           }
+
+          // Persist a call_event message so the call appears inline in the chat
+          // thread and survives app reload (loaded with regular message history).
+          // Only create when the caller is ending the whole session (not a reject/busy).
+          const isSessionEnd = reason !== 'rejected' && reason !== 'busy'
+          if (isSessionEnd && deps.messagesService && deps.djangoSeqClient && callId) {
+            try {
+              const finalCall = await deps.callsService.getCall?.(conversationId, callId)
+              const startMs = finalCall?.startedAt instanceof Date
+                ? finalCall.startedAt.getTime()
+                : finalCall?.startedAt ? new Date(finalCall.startedAt as any).getTime() : null
+              const endMs = Date.now()
+              const durationSecs = startMs ? Math.max(0, Math.round((endMs - startMs) / 1000)) : null
+              const anyJoined = (finalCall?.participants ?? []).some(
+                (p: any) => p.status === 'joined' || p.status === 'left',
+              )
+              const eventStatus = anyJoined
+                ? 'completed'
+                : ['cancelled', 'no_answer', 'ended_by_host'].includes(reason) ? 'cancelled' : 'missed'
+
+              const seqFn = deps.djangoSeqClient?.allocateSeq ?? deps.djangoSeqClient?.allocate
+              let seq: number
+              try {
+                seq = seqFn ? await seqFn(conversationId) : Date.now()
+              } catch {
+                // Django seq allocation failed (e.g. standalone conversation or network).
+                // Use a large negative timestamp-based value so it sorts correctly and
+                // doesn't collide with real seqs (which start at 1 and increment).
+                seq = -(Date.now())
+              }
+              const clientId = `call_event:${callId}`
+
+              const created = await deps.messagesService.createIdempotent({
+                senderId: principal.userId,
+                conversationId,
+                clientId,
+                seq,
+                input: {
+                  kind: 'call_event',
+                  callEvent: {
+                    callId,
+                    callType: existingCall?.callType ?? 'voice',
+                    status: eventStatus,
+                    duration: durationSecs,
+                    participantCount: (finalCall?.participants ?? []).length,
+                    initiatedBy: existingCall?.createdBy ?? principal.userId,
+                  },
+                },
+              })
+
+              // Broadcast the new message to all conv members so it appears live.
+              const msgPayload = {
+                ...(created.dto as any),
+                id: created.id,
+                _id: created.id,
+                seq: created.seq,
+                createdAt: created.createdAt,
+                conversationId,
+                senderId: principal.userId,
+                kind: 'call_event',
+                callEvent: {
+                  callId,
+                  callType: existingCall?.callType ?? 'voice',
+                  status: eventStatus,
+                  duration: durationSecs,
+                  participantCount: (finalCall?.participants ?? []).length,
+                  initiatedBy: existingCall?.createdBy ?? principal.userId,
+                },
+              }
+              safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, msgPayload)
+            } catch (msgErr: any) {
+              logger.warn(`[calls] call_event message failed cid=${conversationId}`, msgErr?.message)
+            }
+          }
         }
       }
 
-      safeEmit(server, rooms.convRoom(conversationId), event, enrichedPayload)
+      // call.offer with explicit invitees: do NOT broadcast to the conv room — that
+      // would ring every socket currently subscribed to the conversation (e.g. other
+      // group-chat members who have the room open). Delivery is handled per-invitee
+      // below via their user rooms. For all other events (call.answer, call.end,
+      // call.ice, SDP …) — and for call.offer with no invitee list (open group /
+      // broadcast) — the conv-room broadcast is correct.
+      const skipConvBroadcast = event === EVT.CALL_OFFER && offerInviteeIds.length > 0
+      if (!skipConvBroadcast) {
+        safeEmit(server, rooms.convRoom(conversationId), event, enrichedPayload)
+      }
+
+      // call.offer: also emit CALL_HOST_JOINED so participants already waiting in
+      // the conv room (via call.waiting.join) can distinguish a host-started call
+      // from a cold incoming call and auto-answer without showing the ring screen.
+      if (event === EVT.CALL_OFFER) {
+        safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_HOST_JOINED, {
+          conversationId,
+          callId,
+          hostUserId: principal.userId,
+          startedAt: new Date().toISOString(),
+        })
+        // Notify waiting participants
+        const waitingParticipants = await deps.callsService?.getWaitingParticipants?.(conversationId, callId ?? '') ?? []
+        for (const uid of waitingParticipants) {
+          safeEmit(server, rooms.userRoom(uid), EVT.CALL_HOST_JOINED, {
+            conversationId,
+            callId,
+            hostUserId: principal.userId,
+            startedAt: new Date().toISOString(),
+          })
+        }
+      }
 
       // call.offer: invitees are typically NOT in the conv room (they have a
       // different screen open). Deliver directly to their user rooms AND pull
@@ -744,6 +867,13 @@ function registerLeaveHandler(server: Server, socket: Socket, deps: CallsDeps) {
     try {
       await deps.rateLimitService?.assert(principal, 'call:leave', 30)
 
+      // Guard: refuse to process a leave on a call that's already terminated.
+      const existingCall = await deps.callsService?.getCall?.(conversationId, callId)
+      if (!existingCall) return safeAck(ack, ok({ delivered: false, reason: 'call_not_found' }))
+      if (existingCall.status === 'ended' || existingCall.status === 'missed') {
+        return safeAck(ack, ok({ delivered: false, reason: 'call_already_ended' }))
+      }
+
       const leftAt = new Date().toISOString()
 
       // Mark this participant as left (non-terminal — other participants stay)
@@ -758,8 +888,7 @@ function registerLeaveHandler(server: Server, socket: Socket, deps: CallsDeps) {
         payloadType: 'left',
       })
 
-      // Decrement broadcast viewer count if this was an audience member
-      const existingCall = await deps.callsService?.getCall?.(conversationId, callId)
+      // Decrement broadcast viewer count if this was an audience member (reuse earlier fetch)
       if (
         existingCall?.callType === 'broadcast' &&
         existingCall?.createdBy !== principal.userId &&
@@ -779,6 +908,19 @@ function registerLeaveHandler(server: Server, socket: Socket, deps: CallsDeps) {
 
       // Auto-end the session only when nobody is left.
       await deps.callsService?.endIfNoActiveParticipants?.(conversationId, callId)
+
+      // If the call is now ended (caller left before anyone answered), broadcast
+      // call.end so every callee's IncomingCallScreen dismisses immediately.
+      const callAfterLeave = await deps.callsService?.getCall?.(conversationId, callId)
+      if (callAfterLeave && (callAfterLeave.status === 'ended' || callAfterLeave.status === 'missed')) {
+        safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_END, {
+          conversationId,
+          callId,
+          reason: 'cancelled',
+          endedBy: principal.userId,
+          endedAt: new Date().toISOString(),
+        })
+      }
 
       safeAck(ack, ok({ delivered: true }))
     } catch (error: any) {
@@ -1251,7 +1393,12 @@ function registerRtmpHandlers(server: Server, socket: Socket, deps: CallsDeps) {
     const callId = typeof p.callId === 'string' ? p.callId : null
     if (!conversationId || !callId) return safeAck(ack, err('required fields missing', 'BAD_REQUEST'))
     try {
+      await deps.rateLimitService?.assert(principal, 'call:host', 60)
       await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (deps.callsService?.getCallCreator) {
+        const creator = await deps.callsService.getCallCreator(conversationId, callId)
+        if (creator && creator !== principal.userId) return safeAck(ack, err('Host only', 'FORBIDDEN'))
+      }
       await deps.callsService?.setRtmp?.(conversationId, callId, false)
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_RTMP_CHANGED, {
         conversationId, callId, rtmpActive: false, changedAt: new Date().toISOString(),
@@ -1328,6 +1475,68 @@ function registerWhiteboardHandlers(server: Server, socket: Socket, deps: CallsD
   })
 }
 
+// ─── call.invite — host adds participants to an already-active call ───────────
+
+function registerInviteHandler(server: Server, socket: Socket, deps: CallsDeps) {
+  socket.on('call.invite', async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    const inviteeUserIds = Array.isArray(p.inviteeUserIds)
+      ? (p.inviteeUserIds as unknown[]).map(String).filter(id => id && id !== principal.userId)
+      : []
+
+    if (!conversationId || !callId || inviteeUserIds.length === 0) {
+      return safeAck(ack, err('conversationId, callId, and inviteeUserIds required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:invite', 20)
+      if (!conversationId.startsWith('standalone:')) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
+
+      const callData = await deps.callsService?.getCall?.(conversationId, callId)
+      if (!callData) {
+        return safeAck(ack, err('Call not found', 'NOT_FOUND'))
+      }
+
+      // Record each invitee and push call.offer to their user room
+      for (const uid of inviteeUserIds) {
+        await deps.callsService?.setParticipantStatus?.(conversationId, callId, uid, 'invited')
+        const invitePayload = {
+          conversationId,
+          callId,
+          callType: callData.callType,
+          fromUserId: principal.userId,
+          title: callData.title ?? undefined,
+          inviteeUserIds: [uid],
+        }
+        safeEmit(server, rooms.userRoom(uid), EVT.CALL_OFFER, invitePayload)
+        server.in(rooms.userRoom(uid)).socketsJoin(rooms.convRoom(conversationId))
+
+        if (deps.notificationsService) {
+          deps.notificationsService.notifyIncomingCall({
+            toUserId: uid,
+            fromUserId: principal.userId,
+            fromDisplayName: principal.username,
+            conversationId,
+            callId,
+            callType: callData.callType,
+            title: callData.title ?? undefined,
+          }).catch((e: any) => logger.warn(`[calls] invite push notify failed userId=${uid}`, e?.message))
+        }
+      }
+
+      safeAck(ack, ok({ delivered: true, invitedCount: inviteeUserIds.length }))
+    } catch (error: any) {
+      logger.error(`[calls] call.invite failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Invite failed', 'ERROR'))
+    }
+  })
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 export function registerCallHandlers(server: Server, socket: Socket, deps: CallsDeps) {
@@ -1363,6 +1572,9 @@ export function registerCallHandlers(server: Server, socket: Socket, deps: Calls
 
   // Join before host
   registerJoinBeforeHostHandlers(server, socket, deps)
+
+  // Mid-call invite
+  registerInviteHandler(server, socket, deps)
 
   // In-call polls
   registerPollHandlers(server, socket, deps)

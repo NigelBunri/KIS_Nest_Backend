@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -61,6 +62,78 @@ export class CallsController {
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 86_400_000)
     const count = await this.callsService.countMissedCallsSince(principal.userId, sinceDate)
     return { count }
+  }
+
+  /**
+   * GET /calls/active?conversationId=X — return the current active call in a
+   * conversation (if any). Used by the chat room to show the "Join call" banner
+   * when the user opens the room after a call has already started.
+   */
+  @Get('active')
+  async activeCall(
+    @Req() req: FastifyRequest,
+    @Query('conversationId') conversationId?: string,
+  ) {
+    await this.resolveUser(req)
+    if (!conversationId) throw new BadRequestException('conversationId required')
+    const call = await this.callsService.getActiveCall(conversationId)
+    if (!call) return { call: null }
+    return {
+      call: {
+        callId: call.callId,
+        conversationId: call.conversationId,
+        callType: call.callType,
+        status: call.status,
+        startedAt: call.startedAt,
+        participantCount: call.participants.filter(
+          (p) => p.status === 'joined' || p.status === 'connecting',
+        ).length,
+        createdBy: call.createdBy,
+        title: call.title,
+      },
+    }
+  }
+
+  /**
+   * GET /calls/conversation?conversationId=X&limit=N — return call history for
+   * a specific conversation, used to render past-call rows in the chat room.
+   */
+  @Get('conversation')
+  async conversationCalls(
+    @Req() req: FastifyRequest,
+    @Query('conversationId') conversationId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const principal = await this.resolveUser(req)
+    if (!conversationId) throw new BadRequestException('conversationId required')
+    const parsedLimit = limit ? Math.min(Number(limit) || 30, 100) : 30
+    const calls = await this.callsService.getCallsForConversation(conversationId, parsedLimit)
+    return {
+      calls: calls.map((c) => {
+        const startMs = c.startedAt instanceof Date ? c.startedAt.getTime() : new Date(c.startedAt as any).getTime()
+        const endMs = c.endedAt instanceof Date ? c.endedAt.getTime() : (c.endedAt ? new Date(c.endedAt as any).getTime() : null)
+        const durationSeconds = endMs != null ? Math.max(0, Math.round((endMs - startMs) / 1000)) : null
+        return {
+          callId: c.callId,
+          conversationId: c.conversationId,
+          callType: c.callType,
+          status: this.callsService.getUserFacingStatus(c, principal.userId),
+          rawStatus: c.status,
+          userStatus: this.callsService.getUserFacingStatus(c, principal.userId),
+          startedAt: (c.startedAt as any)?.toISOString?.() ?? String(c.startedAt),
+          endedAt: (c.endedAt as any)?.toISOString?.() ?? null,
+          duration: durationSeconds,
+          createdBy: c.createdBy,
+          title: c.title,
+          participantCount: c.participants.length,
+          participants: c.participants.map((p) => ({
+            userId: p.userId,
+            status: p.status,
+            role: p.role,
+          })),
+        }
+      }),
+    }
   }
 
   /**
@@ -155,6 +228,30 @@ export class CallsController {
         inviteToken: c.inviteToken,
         participantCount: c.participants.length,
       })),
+    }
+  }
+
+  /**
+   * POST /calls/invite-link — generate (or return) an invite token for any
+   * active call so participants can share a join link mid-call.
+   */
+  @Post('invite-link')
+  async createInviteLink(
+    @Req() req: FastifyRequest,
+    @Body() body: { conversation_id?: string; call_id?: string },
+  ) {
+    await this.resolveUser(req)
+    const conversationId = body.conversation_id
+    const callId = body.call_id
+    if (!conversationId || !callId) {
+      throw new BadRequestException('conversation_id and call_id required')
+    }
+    const token = await this.callsService.getOrCreateInviteToken(conversationId, callId)
+    if (!token) throw new NotFoundException('Call not found or already ended')
+    return {
+      inviteToken: token,
+      inviteLink: `kis://call/join/${token}`,
+      webLink: `https://kis.app/call/join/${token}`,
     }
   }
 
