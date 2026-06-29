@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.git
+.github
+.env
+.env.*
+uploads
+npm-debug.log
+pnpm-debug.log
+.DS_Store
+.pnpm-store

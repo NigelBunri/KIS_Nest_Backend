@@ -76,7 +76,7 @@ export class CallSession {
   @Prop({ type: Date, required: true, index: true })
   startedAt!: Date;
 
-  @Prop({ type: Date, default: null, index: true })
+  @Prop({ type: Date, default: null })
   endedAt!: Date | null;
 
   // Legacy 2-value field kept for backwards compat
@@ -112,7 +112,7 @@ export class CallSession {
   title!: string | null;
 
   // Invite link token — unique random string for join-by-link flow
-  @Prop({ type: String, default: null, sparse: true })
+  @Prop({ type: String, default: null })
   inviteToken!: string | null;
 
   // Scheduled start time (null = start immediately)

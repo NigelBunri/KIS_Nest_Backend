@@ -1,0 +1,11 @@
+packages:
+  - "."
+
+overrides:
+  fastify: 5.8.5
+
+allowBuilds:
+  "@nestjs/core": true
+  mediasoup: true
+  protobufjs: true
+  unrs-resolver: true

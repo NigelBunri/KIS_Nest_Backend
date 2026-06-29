@@ -11,7 +11,7 @@ export class DeviceToken {
   @Prop({ type: String, required: true, enum: ['android', 'ios', 'web'], index: true })
   platform!: 'android' | 'ios' | 'web'
 
-  @Prop({ type: String, required: true, index: true })
+  @Prop({ type: String, required: true })
   token!: string
 
   // ✅ Fix: avoid union type (string | null) and explicitly declare Mongoose type
