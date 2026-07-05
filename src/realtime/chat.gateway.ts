@@ -165,21 +165,31 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
       }
 
-      // Clean up any active call participations for this user
+      // Defer call cleanup for this user's active calls — a brief network
+      // blip, backgrounding, or reconnect cycle shouldn't immediately end the
+      // call. If the user's socket reconnects and re-syncs (call.sync) before
+      // the grace period expires, this scheduled cleanup is cancelled there.
       try {
         const activeCalls = await this.callsService.getActiveCallsForUser(principal.userId);
         for (const call of activeCalls) {
-          await this.callsService.setParticipantStatus(
-            call.conversationId, call.callId, principal.userId, 'left', 'disconnected',
+          this.callsService.scheduleDisconnectGrace(
+            call.conversationId,
+            call.callId,
+            principal.userId,
+            async () => {
+              await this.callsService.setParticipantStatus(
+                call.conversationId, call.callId, principal.userId, 'left', 'disconnected',
+              );
+              await this.callsService.endIfNoActiveParticipants(call.conversationId, call.callId);
+              this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_PARTICIPANT_LEFT, {
+                callId: call.callId,
+                conversationId: call.conversationId,
+                userId: principal.userId,
+                reason: 'disconnected',
+                leftAt: new Date().toISOString(),
+              });
+            },
           );
-          await this.callsService.endIfNoActiveParticipants(call.conversationId, call.callId);
-          this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_PARTICIPANT_LEFT, {
-            callId: call.callId,
-            conversationId: call.conversationId,
-            userId: principal.userId,
-            reason: 'disconnected',
-            leftAt: new Date().toISOString(),
-          });
         }
       } catch (e: any) {
         this.logger.warn(`[WS] call cleanup failed userId=${principal.userId}`, e?.message);

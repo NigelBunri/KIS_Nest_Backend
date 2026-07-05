@@ -46,6 +46,10 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CallsService.name)
   private cleanupTimer?: NodeJS.Timeout
   private _notificationsService?: NotificationsServiceRef
+  // Grace timers for participants whose socket disconnected — a brief
+  // network blip or app backgrounding shouldn't end the call the instant a
+  // socket drops. Keyed by conversationId:callId:userId.
+  private disconnectGraceTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(@InjectModel(CallSession.name) private readonly calls: Model<CallSessionDocument>) {}
 
@@ -64,6 +68,48 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy() {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    for (const timer of this.disconnectGraceTimers.values()) clearTimeout(timer)
+    this.disconnectGraceTimers.clear()
+  }
+
+  private disconnectGraceKey(conversationId: string, callId: string, userId: string): string {
+    return `${conversationId}:${callId}:${userId}`
+  }
+
+  /**
+   * Defer "this participant left" cleanup by `graceMs` instead of acting on a
+   * socket disconnect immediately. A brief network blip, an app backgrounded
+   * briefly, or a socket.io reconnect cycle would otherwise be treated
+   * identically to an explicit call.leave and could end a 1:1 call outright.
+   * If the same participant reconnects and cancels the timer before it fires
+   * (see cancelDisconnectGrace), `onExpire` never runs.
+   */
+  scheduleDisconnectGrace(
+    conversationId: string,
+    callId: string,
+    userId: string,
+    onExpire: () => void | Promise<void>,
+    graceMs = 20_000,
+  ): void {
+    this.cancelDisconnectGrace(conversationId, callId, userId)
+    const key = this.disconnectGraceKey(conversationId, callId, userId)
+    const timer = setTimeout(() => {
+      this.disconnectGraceTimers.delete(key)
+      Promise.resolve(onExpire()).catch((e: any) =>
+        this.logger.warn('[calls] disconnect-grace expiry failed', e?.message),
+      )
+    }, graceMs)
+    this.disconnectGraceTimers.set(key, timer)
+  }
+
+  /** Cancel a pending disconnect-grace timer. Returns true if one was pending. */
+  cancelDisconnectGrace(conversationId: string, callId: string, userId: string): boolean {
+    const key = this.disconnectGraceKey(conversationId, callId, userId)
+    const timer = this.disconnectGraceTimers.get(key)
+    if (!timer) return false
+    clearTimeout(timer)
+    this.disconnectGraceTimers.delete(key)
+    return true
   }
 
   /**

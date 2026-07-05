@@ -113,6 +113,7 @@ export interface CallsDeps {
     addKnocker?(conversationId: string, callId: string, userId: string): Promise<void>
     removeKnocker?(conversationId: string, callId: string, userId: string): Promise<void>
     getCall?(conversationId: string, callId: string): Promise<any>
+    cancelDisconnectGrace?(conversationId: string, callId: string, userId: string): boolean
     setRecordingState?(conversationId: string, callId: string, state: 'idle' | 'recording' | 'stopped', url?: string): Promise<void>
     setRtmp?(conversationId: string, callId: string, active: boolean, url?: string): Promise<void>
     getWaitingParticipants?(conversationId: string, callId: string): Promise<string[]>
@@ -120,6 +121,97 @@ export interface CallsDeps {
 }
 
 // ─── Legacy signaling (call.offer / call.answer / call.ice / call.end) ───────
+
+// Persist a call_event chat message so the call appears inline in the chat
+// thread and survives app reload (loaded with regular message history).
+// Gated on the call SESSION having actually ended (finalCall.status is
+// 'ended'/'missed') rather than on the triggering reason string — this way
+// it correctly covers normal end, a rejected/busy 1:1 call (which does end
+// the whole session), cancel/no-answer, AND the leave-handler auto-end path,
+// while still not firing when a group call continues for other participants
+// (in which case finalCall.status stays 'active'/'ringing').
+// `clientId: call_event:${callId}` makes createIdempotent safe to call from
+// multiple code paths for the same call without creating duplicate rows.
+async function persistCallEndMessageIfSessionEnded(
+  server: Server,
+  deps: CallsDeps,
+  conversationId: string,
+  callId: string,
+  actingUserId: string,
+  existingCall: any,
+  reason: string,
+): Promise<void> {
+  if (!deps.messagesService || !deps.djangoSeqClient || !callId) return
+  try {
+    const finalCall = await deps.callsService?.getCall?.(conversationId, callId)
+    if (!finalCall || (finalCall.status !== 'ended' && finalCall.status !== 'missed')) return
+
+    const startMs = finalCall?.startedAt instanceof Date
+      ? finalCall.startedAt.getTime()
+      : finalCall?.startedAt ? new Date(finalCall.startedAt as any).getTime() : null
+    const endMs = Date.now()
+    const durationSecs = startMs ? Math.max(0, Math.round((endMs - startMs) / 1000)) : null
+    const anyJoined = (finalCall?.participants ?? []).some(
+      (p: any) => p.status === 'joined' || p.status === 'left',
+    )
+    const eventStatus = anyJoined
+      ? 'completed'
+      : ['cancelled', 'no_answer', 'ended_by_host'].includes(reason) ? 'cancelled' : 'missed'
+
+    const seqFn = deps.djangoSeqClient?.allocateSeq ?? deps.djangoSeqClient?.allocate
+    let seq: number
+    try {
+      seq = seqFn ? await seqFn(conversationId) : Date.now()
+    } catch {
+      // Django seq allocation failed (e.g. standalone conversation or network).
+      // Use a large negative timestamp-based value so it sorts correctly and
+      // doesn't collide with real seqs (which start at 1 and increment).
+      seq = -(Date.now())
+    }
+    const clientId = `call_event:${callId}`
+
+    const created = await deps.messagesService.createIdempotent({
+      senderId: actingUserId,
+      conversationId,
+      clientId,
+      seq,
+      input: {
+        kind: 'call_event',
+        callEvent: {
+          callId,
+          callType: existingCall?.callType ?? 'voice',
+          status: eventStatus,
+          duration: durationSecs,
+          participantCount: (finalCall?.participants ?? []).length,
+          initiatedBy: existingCall?.createdBy ?? actingUserId,
+        },
+      },
+    })
+
+    // Broadcast the new message to all conv members so it appears live.
+    const msgPayload = {
+      ...(created.dto as any),
+      id: created.id,
+      _id: created.id,
+      seq: created.seq,
+      createdAt: created.createdAt,
+      conversationId,
+      senderId: actingUserId,
+      kind: 'call_event',
+      callEvent: {
+        callId,
+        callType: existingCall?.callType ?? 'voice',
+        status: eventStatus,
+        duration: durationSecs,
+        participantCount: (finalCall?.participants ?? []).length,
+        initiatedBy: existingCall?.createdBy ?? actingUserId,
+      },
+    }
+    safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, msgPayload)
+  } catch (msgErr: any) {
+    logger.warn(`[calls] call_event message failed cid=${conversationId}`, msgErr?.message)
+  }
+}
 
 function createCallHandler(
   event: typeof EVT.CALL_OFFER | typeof EVT.CALL_ANSWER | typeof EVT.CALL_ICE | typeof EVT.CALL_END,
@@ -297,79 +389,9 @@ function createCallHandler(
             })
           }
 
-          // Persist a call_event message so the call appears inline in the chat
-          // thread and survives app reload (loaded with regular message history).
-          // Only create when the caller is ending the whole session (not a reject/busy).
-          const isSessionEnd = reason !== 'rejected' && reason !== 'busy'
-          if (isSessionEnd && deps.messagesService && deps.djangoSeqClient && callId) {
-            try {
-              const finalCall = await deps.callsService.getCall?.(conversationId, callId)
-              const startMs = finalCall?.startedAt instanceof Date
-                ? finalCall.startedAt.getTime()
-                : finalCall?.startedAt ? new Date(finalCall.startedAt as any).getTime() : null
-              const endMs = Date.now()
-              const durationSecs = startMs ? Math.max(0, Math.round((endMs - startMs) / 1000)) : null
-              const anyJoined = (finalCall?.participants ?? []).some(
-                (p: any) => p.status === 'joined' || p.status === 'left',
-              )
-              const eventStatus = anyJoined
-                ? 'completed'
-                : ['cancelled', 'no_answer', 'ended_by_host'].includes(reason) ? 'cancelled' : 'missed'
-
-              const seqFn = deps.djangoSeqClient?.allocateSeq ?? deps.djangoSeqClient?.allocate
-              let seq: number
-              try {
-                seq = seqFn ? await seqFn(conversationId) : Date.now()
-              } catch {
-                // Django seq allocation failed (e.g. standalone conversation or network).
-                // Use a large negative timestamp-based value so it sorts correctly and
-                // doesn't collide with real seqs (which start at 1 and increment).
-                seq = -(Date.now())
-              }
-              const clientId = `call_event:${callId}`
-
-              const created = await deps.messagesService.createIdempotent({
-                senderId: principal.userId,
-                conversationId,
-                clientId,
-                seq,
-                input: {
-                  kind: 'call_event',
-                  callEvent: {
-                    callId,
-                    callType: existingCall?.callType ?? 'voice',
-                    status: eventStatus,
-                    duration: durationSecs,
-                    participantCount: (finalCall?.participants ?? []).length,
-                    initiatedBy: existingCall?.createdBy ?? principal.userId,
-                  },
-                },
-              })
-
-              // Broadcast the new message to all conv members so it appears live.
-              const msgPayload = {
-                ...(created.dto as any),
-                id: created.id,
-                _id: created.id,
-                seq: created.seq,
-                createdAt: created.createdAt,
-                conversationId,
-                senderId: principal.userId,
-                kind: 'call_event',
-                callEvent: {
-                  callId,
-                  callType: existingCall?.callType ?? 'voice',
-                  status: eventStatus,
-                  duration: durationSecs,
-                  participantCount: (finalCall?.participants ?? []).length,
-                  initiatedBy: existingCall?.createdBy ?? principal.userId,
-                },
-              }
-              safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, msgPayload)
-            } catch (msgErr: any) {
-              logger.warn(`[calls] call_event message failed cid=${conversationId}`, msgErr?.message)
-            }
-          }
+          await persistCallEndMessageIfSessionEnded(
+            server, deps, conversationId, callId, principal.userId, existingCall, reason,
+          )
         }
       }
 
@@ -603,6 +625,27 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
     }
     try {
       await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+      // If this user had a disconnect-grace timer pending (their socket
+      // dropped briefly and they're now re-syncing), cancel it and re-mark
+      // them joined instead of letting the grace period end the call/drop
+      // them as a participant.
+      const wasPendingRemoval = deps.callsService?.cancelDisconnectGrace?.(
+        conversationId, callId, principal.userId,
+      )
+      if (wasPendingRemoval) {
+        await deps.callsService?.setParticipantStatus?.(
+          conversationId, callId, principal.userId, 'joined',
+        )
+        safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_PARTICIPANT_JOINED, {
+          callId,
+          conversationId,
+          userId: principal.userId,
+          rejoined: true,
+          joinedAt: new Date().toISOString(),
+        })
+      }
+
       const participants = await deps.callsService?.getParticipantsSnapshot?.(conversationId, callId) ?? []
       socket.emit('call.participants.snapshot', { conversationId, callId, participants })
       safeAck(ack, ok({ participants }))
@@ -920,6 +963,12 @@ function registerLeaveHandler(server: Server, socket: Socket, deps: CallsDeps) {
           endedBy: principal.userId,
           endedAt: new Date().toISOString(),
         })
+        // This path previously ended the session without ever persisting a
+        // call_event chat message — the auto-end (last participant leaves,
+        // nobody explicitly hit "end call") case was silently uncovered.
+        await persistCallEndMessageIfSessionEnded(
+          server, deps, conversationId, callId, principal.userId, existingCall, 'cancelled',
+        )
       }
 
       safeAck(ack, ok({ delivered: true }))
