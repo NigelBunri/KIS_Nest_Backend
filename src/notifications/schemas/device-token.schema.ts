@@ -20,6 +20,12 @@ export class DeviceToken {
 
   @Prop({ type: Boolean, default: true })
   active!: boolean
+
+  // Distinguishes a regular FCM token from an iOS PushKit VoIP token (which
+  // must be delivered via direct APNs, never through FCM). Missing on
+  // documents written before this field existed — treat as 'fcm'.
+  @Prop({ type: String, enum: ['fcm', 'voip'], default: 'fcm' })
+  tokenType!: 'fcm' | 'voip'
 }
 
 export const DeviceTokenSchema = SchemaFactory.createForClass(DeviceToken)

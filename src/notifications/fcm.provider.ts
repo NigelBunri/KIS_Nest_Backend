@@ -71,13 +71,22 @@ class FcmPushProvider implements PushProvider {
       }
     }
 
-    const payload = {
+    // Incoming-call pushes are data-only + high-priority: the client's
+    // background handler calls RNCallKeep.displayIncomingCall() itself to
+    // show the native ringing UI, so an OS-rendered `notification` block
+    // would show a redundant tray notification alongside it. Every other
+    // push type keeps the `notification` block for normal OS display.
+    const isIncomingCall = data.type === 'incoming_call'
+    const payload: Record<string, unknown> = {
       tokens,
-      notification: {
+      data: isIncomingCall ? { ...data, title: msg.title, body: msg.body } : data,
+      android: { priority: 'high' },
+    }
+    if (!isIncomingCall) {
+      payload.notification = {
         title: msg.title,
         body: msg.body,
-      },
-      data,
+      }
     }
 
     const res = await this.admin.messaging().sendEachForMulticast(payload)

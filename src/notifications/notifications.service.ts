@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DeviceTokensService } from './device-tokens.service';
 import { DjangoUserPrefsClient } from './django-user-prefs.client';
 import { createFcmProvider } from './fcm.provider';
+import { createApnsVoipProvider, ApnsVoipProvider } from './apns-voip.provider';
 import { DummyPushProvider, PushMessage, PushProvider } from './push.provider';
 
 export type PushTarget = { userId: string; deviceTokens?: string[] };
@@ -21,6 +22,7 @@ function isInQuietHours(dnd: { start?: string; end?: string }): boolean {
 @Injectable()
 export class NotificationsService implements OnModuleInit {
   private readonly provider: PushProvider;
+  private readonly apnsVoip: ApnsVoipProvider | null;
   private readonly logger = new Logger(NotificationsService.name);
 
   constructor(
@@ -35,6 +37,15 @@ export class NotificationsService implements OnModuleInit {
       );
     }
     this.provider = fcm ?? new DummyPushProvider();
+
+    this.apnsVoip = createApnsVoipProvider();
+    if (!this.apnsVoip) {
+      this.logger.warn(
+        'APNs VoIP provider not initialised — incoming-call pushes will fall back to FCM only ' +
+        '(no CallKit wake from killed state on iOS). Set APNS_KEY_PATH/APNS_KEY_BASE64, ' +
+        'APNS_KEY_ID, APNS_TEAM_ID and APNS_BUNDLE_ID to enable it.',
+      );
+    }
   }
 
   onModuleInit() {
@@ -81,6 +92,32 @@ export class NotificationsService implements OnModuleInit {
     const callerLabel = input.fromDisplayName || input.fromUserId;
     const callLabel = input.title || (input.callType ? `${input.callType} call` : 'call');
 
+    // iOS: prefer a real PushKit VoIP push so CallKit can wake the app and
+    // ring even when it's fully killed. Payload keys must match exactly what
+    // AppDelegate.swift's PKPushRegistryDelegate reads (callId/callerName/callType).
+    if (this.apnsVoip) {
+      const voipTokens = await this.tokens.listActiveVoipTokens(input.toUserId).catch(() => []);
+      if (voipTokens.length) {
+        try {
+          const res = await this.apnsVoip.sendVoip(voipTokens, {
+            callId: input.callId,
+            callerName: callerLabel,
+            callType: input.callType ?? 'voice',
+            conversationId: input.conversationId,
+            fromUserId: input.fromUserId,
+            type: 'incoming_call',
+          });
+          if (res.failedTokens.length) {
+            await this.tokens.bulkDeactivate(res.failedTokens).catch(() => null);
+          }
+        } catch (e: any) {
+          this.logger.warn(`VoIP push failed for userId=${input.toUserId}: ${e?.message}`);
+        }
+      }
+    }
+
+    // Also always send a regular FCM push — covers Android, and any iOS
+    // device that hasn't registered a VoIP token yet.
     return this.notify(
       { userId: input.toUserId },
       {

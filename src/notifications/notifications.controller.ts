@@ -6,6 +6,8 @@ type RegisterTokenBody = {
   token?: string;
   platform?: 'android' | 'ios' | 'web';
   deviceId?: string;
+  tokenType?: 'fcm' | 'voip';
+  token_type?: 'fcm' | 'voip';
 };
 
 @Controller('notifications')
@@ -30,6 +32,7 @@ export class NotificationsController {
 
     const pushToken = body?.token ? String(body.token) : '';
     const platform = body?.platform ?? 'android';
+    const tokenType = body?.tokenType ?? body?.token_type ?? 'fcm';
     if (!pushToken) return { ok: false, reason: 'token_required' };
 
     await this.tokens.upsert({
@@ -37,6 +40,7 @@ export class NotificationsController {
       token: pushToken,
       platform,
       deviceId: body?.deviceId,
+      tokenType,
     });
 
     return { ok: true };

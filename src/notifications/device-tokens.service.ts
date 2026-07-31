@@ -16,6 +16,7 @@ export class DeviceTokensService {
     platform: 'android' | 'ios' | 'web';
     token: string;
     deviceId?: string;
+    tokenType?: 'fcm' | 'voip';
   }) {
     await this.model.updateOne(
       { userId: input.userId, token: input.token },
@@ -24,6 +25,7 @@ export class DeviceTokensService {
           platform: input.platform,
           deviceId: input.deviceId ?? null,
           active: true,
+          tokenType: input.tokenType ?? 'fcm',
         },
         $setOnInsert: { userId: input.userId, token: input.token },
       },
@@ -54,7 +56,19 @@ export class DeviceTokensService {
   }
 
   async listActiveTokens(userId: string): Promise<string[]> {
-    const rows = await this.model.find({ userId, active: true }).select({ token: 1 });
+    // Exclude voip-only tokens (they can't be sent through FCM). `$ne` rather
+    // than an exact 'fcm' match so documents written before `tokenType`
+    // existed (field absent) still count as fcm-compatible.
+    const rows = await this.model
+      .find({ userId, active: true, tokenType: { $ne: 'voip' } })
+      .select({ token: 1 });
+    return rows.map((r) => String((r as any).token));
+  }
+
+  async listActiveVoipTokens(userId: string): Promise<string[]> {
+    const rows = await this.model
+      .find({ userId, active: true, tokenType: 'voip', platform: 'ios' })
+      .select({ token: 1 });
     return rows.map((r) => String((r as any).token));
   }
 }
