@@ -1,9 +1,13 @@
 // src/uploads/uploads.controller.ts
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
+  NotFoundException,
+  Param,
   Post,
+  Put,
   Query,
   Req,
   Res,
@@ -13,44 +17,21 @@ import type { FastifyReply, FastifyRequest } from 'fastify'; // ✅ type-only im
 import '@fastify/multipart'; // ✅ bring in .file() augmentation (types-side effect)
 import { StorageService } from '../storage/storage.service';
 import { HttpAuthGuard } from '../auth/http-auth.guard';
-
-const SHORT_VIDEO_MAX_BYTES =
-  Number(process.env.SHORT_VIDEO_MAX_BYTES) || 15 * 1024 * 1024; // ~15MB
-const SHORT_VIDEO_DURATION_SECONDS =
-  Number(process.env.SHORT_VIDEO_DURATION_SECONDS) || 3 * 60;
-const DEFAULT_MAX_UPLOAD_BYTES = 2_147_483_647;
-const MAX_UPLOAD_BYTES =
-  Number(process.env.UPLOAD_MAX_BYTES) || DEFAULT_MAX_UPLOAD_BYTES;
-const BLOCKED_EXTENSIONS = new Set([
-  'apk',
-  'app',
-  'bat',
-  'bin',
-  'cmd',
-  'com',
-  'dll',
-  'dmg',
-  'exe',
-  'js',
-  'mjs',
-  'msi',
-  'ps1',
-  'scr',
-  'sh',
-  'vbs',
-]);
-const ALLOWED_MIME_PREFIXES = ['image/', 'video/', 'audio/', 'text/'];
-const ALLOWED_MIME_TYPES = new Set([
-  'application/json',
-  'application/pdf',
-  'application/msword',
-  'application/vnd.ms-excel',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/zip',
-]);
+import { LocalStorageService, verifyLocalPresignToken } from '../storage/local-storage.service';
+import { UploadIntentService } from './upload-intent.service';
+import { InitiateUploadDto, ConfirmUploadDto } from './upload-intent.dto';
+import {
+  ATTACHMENT_TTL_DAYS,
+  BLOCKED_EXTENSIONS,
+  MAX_UPLOAD_BYTES,
+  classifyKind,
+  extensionFor,
+  guessAttachmentKind,
+  isAllowedMime,
+  servesUploadsPublicly,
+  uploadScanStatus,
+  videoCategoryForKind,
+} from './upload-validation';
 
 // Magic-byte signatures: [bytes, offset, allowed_mime_prefixes_or_types]
 const MAGIC_SIGNATURES: Array<{ bytes: number[]; offset?: number; mimes: string[] }> = [
@@ -86,22 +67,6 @@ function hasBlockedMagic(buf: Buffer): boolean {
   return BLOCKED_MAGIC.some(sig => sig.every((b, i) => buf[i] === b))
 }
 
-const extensionFor = (filename?: string) => {
-  const match = String(filename || '')
-    .toLowerCase()
-    .match(/\.([a-z0-9]+)$/);
-  return match?.[1] || '';
-};
-
-const isAllowedMime = (mime?: string) => {
-  const normalized = String(mime || '').toLowerCase();
-  if (!normalized || normalized === 'application/octet-stream') return false;
-  return (
-    ALLOWED_MIME_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
-    ALLOWED_MIME_TYPES.has(normalized)
-  );
-};
-
 const mimeMatchesMagic = (declaredMime: string, buf: Buffer): boolean => {
   if (hasBlockedMagic(buf)) return false
   const detected = detectMagicMime(buf)
@@ -115,21 +80,12 @@ const mimeMatchesMagic = (declaredMime: string, buf: Buffer): boolean => {
   return true
 };
 
-const servesUploadsPublicly = () => {
-  const explicit = String(process.env.SERVE_UPLOADS_PUBLICLY ?? '').trim();
-  if (explicit === '1') return true;
-  if (explicit === '0') return false;
-  return (process.env.NODE_ENV ?? '').toLowerCase() !== 'production';
-};
-
-const uploadScanStatus = () =>
-  String(process.env.UPLOAD_SCAN_REQUIRED ?? '').trim() === '1'
-    ? 'pending'
-    : 'not_configured';
-
 @Controller('uploads')
 export class UploadsController {
-  constructor(private readonly storage: StorageService) {}
+  constructor(
+    private readonly storage: StorageService,
+    private readonly uploadIntents: UploadIntentService,
+  ) {}
 
   // No auth required on download — keys contain random UUIDs so they are
   // not guessable, and removing auth eliminates the Django introspect
@@ -233,40 +189,10 @@ export class UploadsController {
       ? `${proto}://${host}/uploads/file?key=${encodeURIComponent(stored.key)}`
       : `/uploads/file?key=${encodeURIComponent(stored.key)}`;
 
-    const baseKind = (() => {
-      const mime = stored.mime || '';
-      if (mime.startsWith('image/')) return 'image';
-      if (mime.startsWith('video/')) return 'video';
-      if (mime.startsWith('audio/')) return 'audio';
-      if (
-        mime.includes('pdf') ||
-        mime.includes('msword') ||
-        mime.includes('officedocument')
-      )
-        return 'document';
-      return 'other';
-    })();
+    const baseKind = guessAttachmentKind(stored.mime);
     const durationSeconds = parseDurationSeconds();
-    let kind = baseKind;
-    if (baseKind === 'video') {
-      if (durationSeconds !== undefined) {
-        kind =
-          durationSeconds < SHORT_VIDEO_DURATION_SECONDS
-            ? 'short_video'
-            : 'video';
-      } else if (size <= SHORT_VIDEO_MAX_BYTES) {
-        kind = 'short_video';
-      } else {
-        kind = 'video';
-      }
-    }
-
-    const videoCategory =
-      kind === 'short_video'
-        ? 'shorts'
-        : kind === 'video' || kind === 'long_video'
-          ? 'videos'
-          : undefined;
+    const kind = classifyKind(baseKind, size, durationSeconds);
+    const videoCategory = videoCategoryForKind(kind);
 
     // Public S3 buckets can be displayed directly from S3/CDN. Private S3
     // buckets must use the authenticated download endpoint so objects remain
@@ -281,8 +207,7 @@ export class UploadsController {
     const primaryPublicUrl = publicStorage ? stored.url : undefined;
 
     // Files expire from S3 after 10 days. The cleanup job uses this field.
-    const FILE_TTL_DAYS = Number(process.env.ATTACHMENT_TTL_DAYS || '10');
-    const expiresAt = new Date(Date.now() + FILE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + ATTACHMENT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     const attachmentResponse: Record<string, unknown> = {
       id: stored.key,
@@ -314,5 +239,74 @@ export class UploadsController {
       ok: true,
       attachment: attachmentResponse,
     };
+  }
+
+  // --------------------------------------------------------------------
+  // Direct-to-storage presigned-PUT handshake (mirrors the Django
+  // profile-image flow in apps/media/upload_intent.py). See
+  // upload-intent.service.ts for the full initiate/confirm logic — these
+  // routes are thin HTTP wrappers, same relationship the legacy `/file`
+  // route above has to StorageService.
+  // --------------------------------------------------------------------
+
+  @Post('initiate')
+  @UseGuards(HttpAuthGuard)
+  async initiate(@Req() req: FastifyRequest, @Body() body: InitiateUploadDto) {
+    const userId = (req as any).principal?.userId;
+    const result = await this.uploadIntents.initiate({
+      userId,
+      context: body.context,
+      filename: body.filename,
+      contentType: body.content_type,
+      sizeBytes: body.size_bytes,
+      conversationId: body.conversationId,
+      clientId: body.clientId,
+    });
+    return result;
+  }
+
+  @Post(':id/confirm')
+  @UseGuards(HttpAuthGuard)
+  async confirm(
+    @Req() req: FastifyRequest,
+    @Param('id') id: string,
+    @Body() body: ConfirmUploadDto,
+  ) {
+    const userId = (req as any).principal?.userId;
+    const host = req.headers?.host;
+    const proto = (req.headers?.['x-forwarded-proto'] as string) || (req as any).protocol || 'http';
+    const attachment = await this.uploadIntents.confirm({
+      userId,
+      uploadId: id,
+      durationSeconds: body.duration_seconds,
+      host,
+      proto,
+    });
+    return { ok: true, attachment };
+  }
+
+  // Dev-mode only (LocalStorageService's stand-in for a real S3 presigned
+  // PUT) — the token itself is the credential, same principle as S3's
+  // signed query string, so this route intentionally has no HttpAuthGuard.
+  @Put('local-put')
+  async localPut(
+    @Query('key') key: string,
+    @Query('token') token: string,
+    @Req() req: FastifyRequest,
+    @Res() reply: FastifyReply,
+  ) {
+    if (!(this.storage instanceof LocalStorageService)) {
+      throw new NotFoundException();
+    }
+    if (!key || !token || !verifyLocalPresignToken(key, token)) {
+      throw new BadRequestException('Invalid or expired upload URL.');
+    }
+    const buffer = req.body as Buffer;
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      throw new BadRequestException('No file body received.');
+    }
+    const contentType = String(req.headers?.['content-type'] || 'application/octet-stream');
+    await this.storage.writeDirectPut(key, buffer, contentType);
+    reply.status(200).send({ ok: true });
   }
 }

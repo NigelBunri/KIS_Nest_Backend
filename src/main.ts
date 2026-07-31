@@ -144,6 +144,19 @@ async function bootstrap() {
   });
 
   if (!hasS3UploadConfig()) {
+    // Dev-mode only: `PUT /uploads/local-put` (LocalStorageService's
+    // stand-in for a real S3 presigned PUT) receives an arbitrary-content-type
+    // raw body. Fastify only parses JSON/multipart out of the box, so this
+    // catch-all parser makes every other content type readable as a Buffer —
+    // it's a fallback, only invoked for content types with no specific
+    // parser already registered above.
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .addContentTypeParser('*', { parseAs: 'buffer' }, (_req, payload, done) => {
+        done(null, payload);
+      });
+
     const uploadsDir = process.env.UPLOADS_DIR || 'uploads';
     const absUploads = join(process.cwd(), uploadsDir);
 

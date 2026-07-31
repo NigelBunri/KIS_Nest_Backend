@@ -5,10 +5,13 @@ import { Readable } from 'stream';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   NoSuchKey,
+  NotFound,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { StorageService, StoredFile, StoredFileStream } from './storage.service';
 
 const env = (...names: string[]) => {
@@ -79,6 +82,40 @@ export class S3StorageService extends StorageService {
 
   async deleteFile(key: string): Promise<void> {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+  publicUrlFor(key: string): string {
+    return `${this.publicBase}/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
+  }
+
+  async generatePresignedPut(key: string, contentType: string, expiresIn: number): Promise<string> {
+    // Binding ContentType into the signed command means S3 itself enforces
+    // that the client's PUT sends the same Content-Type validated at
+    // initiate time — a mismatched header invalidates the signature rather
+    // than needing a server-side re-check after the fact.
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ContentType: contentType,
+    });
+    return getSignedUrl(this.client, command, { expiresIn });
+  }
+
+  async headObjectMeta(key: string): Promise<{ size: number; contentType: string } | null> {
+    try {
+      const response = await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return {
+        size: Number(response.ContentLength || 0),
+        contentType: String(response.ContentType || ''),
+      };
+    } catch (error) {
+      if (error instanceof NotFound || (error as { name?: string }).name === 'NotFound') {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async getFile(key: string): Promise<StoredFileStream> {
