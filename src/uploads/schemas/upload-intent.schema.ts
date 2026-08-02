@@ -27,6 +27,19 @@ export class UploadIntent {
   @Prop({ required: true })
   context!: string;
 
+  /**
+   * The value the client sends back to POST /uploads/:id/confirm (UUID,
+   * minted here at initiate time). MUST NOT be the storage key — a key
+   * containing '/' (every objectKey below does, via its date prefix)
+   * cannot survive as a single REST path segment: even URL-encoded as
+   * %2F, Fastify's router does not decode it back to '/' for route
+   * matching, so a confirm request built from the key 404s before it ever
+   * reaches this service. This was the actual root cause of video (and,
+   * silently, every other file type using this flow) failing confirmation.
+   */
+  @Prop({ required: true, unique: true, index: true })
+  uploadId!: string;
+
   @Prop({ required: true, unique: true })
   objectKey!: string;
 

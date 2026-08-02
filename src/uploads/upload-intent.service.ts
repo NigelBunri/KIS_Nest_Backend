@@ -89,11 +89,16 @@ export class UploadIntentService {
 
     const safeName = filename.replace(/[^\w.\-]+/g, '_');
     const objectKey = `${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeName}`;
+    // Deliberately a *different* random UUID than any part of objectKey —
+    // this is the only value the client is allowed to send back to
+    // /uploads/:id/confirm. It never contains '/', unlike objectKey.
+    const uploadId = randomUUID();
     const expiresAt = new Date(Date.now() + INTENT_EXPIRY_SECONDS * 1000);
 
     await this.intentModel.create({
       ownerId: params.userId,
       context: params.context || 'general',
+      uploadId,
       objectKey,
       contentType,
       originalFilename: safeName,
@@ -107,7 +112,17 @@ export class UploadIntentService {
     const uploadUrl = await this.storage.generatePresignedPut(objectKey, contentType, PRESIGN_EXPIRY_SECONDS);
 
     return {
-      upload_id: objectKey,
+      // Canonical, camelCase field the client must use for confirmation.
+      uploadId,
+      storageKey: objectKey,
+      uploadUrl,
+      headers: { 'Content-Type': contentType },
+      expiresInSeconds: PRESIGN_EXPIRY_SECONDS,
+      // Legacy snake_case aliases kept only for backward compatibility with
+      // any in-flight client build during rollout — never derived from the
+      // storage key. Safe to remove once all clients are confirmed on the
+      // camelCase contract above.
+      upload_id: uploadId,
       upload_url: uploadUrl,
       object_key: objectKey,
       expires_in: PRESIGN_EXPIRY_SECONDS,
@@ -115,12 +130,21 @@ export class UploadIntentService {
     };
   }
 
+  private static readonly UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
   async confirm(params: ConfirmUploadParams) {
-    // The object key doubles as upload_id — it's already unguessable
-    // (random UUID) and pinning confirm to "the intent owned by this user
-    // whose key is this" avoids a second, separate identifier.
+    // Reject anything that isn't shaped like the UUID minted at initiate
+    // time up front — in particular, a raw storage key (which always
+    // contains '/') gets a controlled 400 here instead of either a bare
+    // Mongo miss or, worse, silently matching the wrong record.
+    if (!params.uploadId || !UploadIntentService.UUID_RE.test(params.uploadId)) {
+      throw new BadRequestException(
+        'Invalid upload confirmation id — expected the uploadId returned by /uploads/initiate, not a storage key.',
+      );
+    }
+
     const intent = await this.intentModel.findOne({
-      objectKey: params.uploadId,
+      uploadId: params.uploadId,
       ownerId: params.userId,
     });
     if (!intent) {
@@ -275,6 +299,11 @@ export class UploadIntentService {
     await this.intentModel.create({
       ownerId: params.ownerId,
       context: 'legacy_multipart',
+      // This path bytes-uploads synchronously and is already 'confirmed'
+      // by the time this record is created — there is no separate confirm
+      // step to guard, but uploadId is a required schema field, so mint one
+      // for consistency (distinct from attachmentId, which is client-facing).
+      uploadId: randomUUID(),
       objectKey: params.objectKey,
       attachmentId,
       contentType: params.contentType,
