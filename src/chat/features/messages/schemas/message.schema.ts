@@ -12,8 +12,17 @@ export type MessageDocument = HydratedDocument<Message>;
 
 @Schema({ _id: false })
 class Attachment {
+  /** Stable, client-facing identity (UUID). NEVER the raw storage key. */
   @Prop({ required: true }) id!: string;
   @Prop({ required: true }) url!: string;
+
+  /**
+   * Real storage-provider object key (S3 key or local path key), used only
+   * server-side to resolve fresh presigned URLs / stream bytes. Absent on
+   * attachments persisted before this field existed — those legacy rows
+   * fall back to treating `id` as the key (see AttachmentAccessService).
+   */
+  @Prop() storageKey?: string;
 
   @Prop({ required: true }) originalName!: string;
   @Prop({ required: true }) mimeType!: string;
@@ -35,6 +44,10 @@ class Attachment {
   @Prop({ default: false }) viewOnce?: boolean;
   /** ISO timestamp when the recipient first opened this view-once attachment */
   @Prop() viewedAt?: string;
+
+  /** Media-safety / moderation state, carried through from upload confirmation. */
+  @Prop() scanStatus?: string;
+  @Prop({ default: false }) quarantined?: boolean;
 }
 const AttachmentSchema = SchemaFactory.createForClass(Attachment);
 

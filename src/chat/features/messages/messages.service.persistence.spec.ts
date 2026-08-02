@@ -11,7 +11,7 @@ describe('MessagesService durable history pagination', () => {
     const limit = jest.fn(() => ({ lean }))
     const sort = jest.fn(() => ({ limit }))
     const find = jest.fn(() => ({ sort }))
-    const service = new MessagesService({ find } as any)
+    const service = new MessagesService({ find } as any, {} as any)
 
     const result = await service.listRecent({
       conversationId: 'conversation-1',

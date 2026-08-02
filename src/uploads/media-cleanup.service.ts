@@ -75,15 +75,16 @@ export class MediaCleanupService implements OnApplicationBootstrap, OnApplicatio
   async runCleanup(): Promise<void> {
     const now = new Date();
 
-    // Find all messages with at least one non-expired attachment whose expiresAt has passed.
+    // Find all messages with at least one non-expired attachment (in either
+    // array — `attachments` and `media.attachments` are persisted as
+    // duplicates of the same list) whose expiresAt has passed.
+    const expiredElemMatch = { expiresAt: { $lt: now }, expired: { $ne: true } };
     const messages = await this.messageModel
       .find({
-        'attachments': {
-          $elemMatch: {
-            expiresAt: { $lt: now },
-            expired: { $ne: true },
-          },
-        },
+        $or: [
+          { attachments: { $elemMatch: expiredElemMatch } },
+          { 'media.attachments': { $elemMatch: expiredElemMatch } },
+        ],
       })
       .lean()
       .exec();
@@ -95,40 +96,58 @@ export class MediaCleanupService implements OnApplicationBootstrap, OnApplicatio
     let deleted = 0;
     let errors = 0;
 
+    // Deletes the underlying object at most once per storage key even when
+    // the same attachment appears in both `attachments` and
+    // `media.attachments` on the same message.
+    const expireOne = async (att: any, alreadyDeletedKeys: Set<string>): Promise<boolean> => {
+      if (att.expired || !att.expiresAt) return false;
+      const expiry = new Date(att.expiresAt);
+      if (expiry > now) return false;
+
+      // Prefer the real storage key; only legacy rows (persisted before
+      // storageKey existed) used `id` as the key directly.
+      const key: string | undefined = att.storageKey || att.id;
+      if (key && !alreadyDeletedKeys.has(key)) {
+        try {
+          await this.storage.deleteFile(key);
+          alreadyDeletedKeys.add(key);
+          deleted++;
+        } catch (e: any) {
+          // NoSuchKey is fine — file already gone.
+          if (e?.name !== 'NoSuchKey' && !String(e?.message ?? '').includes('NoSuchKey')) {
+            this.logger.warn(`[MediaCleanup] Failed to delete key=${key}: ${e?.message}`);
+            errors++;
+            return false;
+          }
+          alreadyDeletedKeys.add(key);
+        }
+      }
+      att.expired = true;
+      att.url = '';
+      return true;
+    };
+
     for (const msg of messages) {
       const attachments: any[] = Array.isArray((msg as any).attachments) ? (msg as any).attachments : [];
+      const mediaAttachments: any[] = Array.isArray((msg as any).media?.attachments)
+        ? (msg as any).media.attachments
+        : [];
+      const deletedKeys = new Set<string>();
       let changed = false;
 
       for (const att of attachments) {
-        if (att.expired || !att.expiresAt) continue;
-        const expiry = new Date(att.expiresAt);
-        if (expiry > now) continue;
-
-        // Delete the file from storage using the id (which is the S3 key).
-        const key = att.id;
-        if (key) {
-          try {
-            await this.storage.deleteFile(key);
-            deleted++;
-          } catch (e: any) {
-            // NoSuchKey is fine — file already gone.
-            if (e?.name !== 'NoSuchKey' && !String(e?.message ?? '').includes('NoSuchKey')) {
-              this.logger.warn(`[MediaCleanup] Failed to delete key=${key}: ${e?.message}`);
-              errors++;
-              continue;
-            }
-          }
-        }
-        att.expired = true;
-        att.url = '';
-        changed = true;
+        if (await expireOne(att, deletedKeys)) changed = true;
+      }
+      for (const att of mediaAttachments) {
+        if (await expireOne(att, deletedKeys)) changed = true;
       }
 
       if (changed) {
-        await this.messageModel.updateOne(
-          { _id: (msg as any)._id },
-          { $set: { attachments } },
-        ).exec();
+        const update: Record<string, unknown> = { attachments };
+        if ((msg as any).media) {
+          update.media = { ...(msg as any).media, attachments: mediaAttachments };
+        }
+        await this.messageModel.updateOne({ _id: (msg as any)._id }, { $set: update }).exec();
       }
     }
 

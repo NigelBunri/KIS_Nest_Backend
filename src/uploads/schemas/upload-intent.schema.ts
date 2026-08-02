@@ -30,6 +30,10 @@ export class UploadIntent {
   @Prop({ required: true, unique: true })
   objectKey!: string;
 
+  /** Stable client-facing attachment id (UUID) — never the raw storage key. */
+  @Prop({ index: true, unique: true, sparse: true })
+  attachmentId?: string;
+
   @Prop({ required: true })
   contentType!: string;
 

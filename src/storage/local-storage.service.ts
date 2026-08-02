@@ -127,6 +127,13 @@ export class LocalStorageService extends StorageService {
     return `${this.pathForKey(key)}.meta.json`;
   }
 
+  // Local dev storage has no presigned-GET concept — callers must check
+  // driver() === 's3' before calling this and use the authenticated
+  // `/uploads/:attachmentId/stream` route instead for 'local'.
+  async generatePresignedGet(): Promise<string> {
+    throw new Error('generatePresignedGet is not supported by LocalStorageService; use the stream route.');
+  }
+
   async generatePresignedPut(key: string, _contentType: string, expiresIn: number): Promise<string> {
     const expiresAtMs = Date.now() + expiresIn * 1000;
     const token = signLocalPresignToken(key, expiresAtMs);

@@ -179,6 +179,15 @@ export class UploadIntentService {
       throw new BadRequestException("Uploaded file's content type is not allowed.");
     }
 
+    // First confirm mints the stable, opaque id this attachment will be
+    // known by everywhere downstream (message persistence, socket
+    // broadcast, history, the receiver's download-url request). Repeat
+    // confirms (client retry after a dropped response) must return the
+    // SAME id — never mint a second one for the same intent.
+    if (!intent.attachmentId) {
+      intent.attachmentId = randomUUID();
+    }
+
     const attachment = this.buildAttachment(intent, meta, params);
 
     intent.status = 'confirmed';
@@ -201,6 +210,9 @@ export class UploadIntentService {
 
     const host = params.host;
     const proto = params.proto || 'http';
+    // Legacy, unauthenticated key-based link — kept only for the
+    // transitional compatibility window (see uploads.controller.ts). New
+    // downloads should call GET /uploads/:attachmentId/download-url instead.
     const authenticatedDownloadUrl = host
       ? `${proto}://${host}/uploads/file?key=${encodeURIComponent(intent.objectKey)}`
       : `/uploads/file?key=${encodeURIComponent(intent.objectKey)}`;
@@ -213,7 +225,8 @@ export class UploadIntentService {
     const scanStatus = uploadScanStatus();
 
     const attachment: Record<string, unknown> = {
-      id: intent.objectKey,
+      id: intent.attachmentId,
+      storageKey: intent.objectKey,
       url: primaryUrl,
       publicUrl: publicStorage ? primaryUrl : undefined,
       displayUrl: primaryUrl,
@@ -238,5 +251,40 @@ export class UploadIntentService {
       attachment.video_category = videoCategory;
     }
     return attachment;
+  }
+
+  /**
+   * Registers a synchronously-completed upload (the legacy `POST
+   * /uploads/file` multipart proxy, which never goes through
+   * initiate/confirm) as an already-confirmed UploadIntent, so it is
+   * resolvable through the exact same attachmentId lookup path as
+   * presigned-PUT uploads. Keeps a single canonical resolution mechanism
+   * for AttachmentAccessService instead of two.
+   */
+  async recordDirectUpload(params: {
+    ownerId: string;
+    objectKey: string;
+    contentType: string;
+    originalFilename: string;
+    sizeBytes: number;
+    conversationId?: string;
+    attachment: Record<string, unknown>;
+  }): Promise<string> {
+    const attachmentId = randomUUID();
+    const expiresAt = new Date(Date.now() + ATTACHMENT_TTL_DAYS * 24 * 60 * 60 * 1000);
+    await this.intentModel.create({
+      ownerId: params.ownerId,
+      context: 'legacy_multipart',
+      objectKey: params.objectKey,
+      attachmentId,
+      contentType: params.contentType,
+      originalFilename: params.originalFilename,
+      sizeBytes: params.sizeBytes,
+      status: 'confirmed',
+      expiresAt,
+      conversationId: params.conversationId,
+      confirmedAttachment: { ...params.attachment, id: attachmentId, storageKey: params.objectKey },
+    });
+    return attachmentId;
   }
 }

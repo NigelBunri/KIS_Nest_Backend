@@ -88,6 +88,17 @@ export class S3StorageService extends StorageService {
     return `${this.publicBase}/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
   }
 
+  async generatePresignedGet(key: string, expiresIn: number, responseFilename?: string): Promise<string> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ...(responseFilename
+        ? { ResponseContentDisposition: `attachment; filename="${responseFilename.replace(/[\r\n"]+/g, '_')}"` }
+        : {}),
+    });
+    return getSignedUrl(this.client, command, { expiresIn });
+  }
+
   async generatePresignedPut(key: string, contentType: string, expiresIn: number): Promise<string> {
     // Binding ContentType into the signed command means S3 itself enforces
     // that the client's PUT sends the same Content-Type validated at

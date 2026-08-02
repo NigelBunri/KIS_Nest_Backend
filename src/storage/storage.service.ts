@@ -28,4 +28,11 @@ export abstract class StorageService {
 
   /** Public (CDN/bucket) URL for a key — only meaningful when isPublic() is true. */
   abstract publicUrlFor(key: string): string;
+
+  /**
+   * Fresh short-lived presigned GET URL for a private object. Only
+   * meaningful when driver() === 's3' — callers must branch on driver()
+   * and fall back to an authenticated streaming route for 'local'.
+   */
+  abstract generatePresignedGet(key: string, expiresIn: number, responseFilename?: string): Promise<string>;
 }

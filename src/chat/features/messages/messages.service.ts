@@ -7,11 +7,13 @@ import { Model } from 'mongoose'
 import { Message, MessageDocument, MessageKind } from './schemas/message.schema'
 import { SendMessageDto } from './messages.dto'
 import type { SendMessagePayload, EditMessagePayload } from '../../chat.types'
+import { UploadIntent, UploadIntentDocument } from '../../../uploads/schemas/upload-intent.schema'
 
 @Injectable()
 export class MessagesService {
   constructor(
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
+    @InjectModel(UploadIntent.name) private readonly uploadIntentModel: Model<UploadIntentDocument>,
   ) {}
 
   /**
@@ -104,16 +106,20 @@ export class MessagesService {
     const rawMedia = (args.input as any).media && typeof (args.input as any).media === 'object'
       ? (args.input as any).media
       : undefined
-    const mediaAttachments = Array.isArray(rawMedia?.attachments)
-      ? this.normalizeAttachments(rawMedia.attachments)
-      : undefined
+    const ctx = { senderId: args.senderId }
+    const [normalizedTopLevelAttachments, mediaAttachments] = await Promise.all([
+      this.normalizeAttachments((args.input as any).attachments, ctx),
+      Array.isArray(rawMedia?.attachments)
+        ? this.normalizeAttachments(rawMedia.attachments, ctx)
+        : Promise.resolve(undefined),
+    ])
     const legacyInput: SendMessageDto = {
       ...(args.input as any),
       conversationId: args.conversationId,
       clientId: args.clientId,
       // your schema expects replyToId (frontend uses replyTo)
       replyToId: (args.input as any).replyToId ?? (args.input as any).replyTo,
-      attachments: this.normalizeAttachments((args.input as any).attachments),
+      attachments: normalizedTopLevelAttachments,
       media: rawMedia ? { ...rawMedia, attachments: mediaAttachments ?? [] } : undefined,
     }
 
@@ -580,24 +586,69 @@ export class MessagesService {
     return msg
   }
 
-  private normalizeAttachments(input: any): any[] | undefined {
+  /**
+   * Builds the attachment shape actually persisted on a message. Where a
+   * server-recorded UploadIntent exists for a given attachment id (i.e. it
+   * really did go through /uploads/initiate+confirm or the multipart
+   * proxy), identity/size/mime/storageKey/scan-state come from THAT record,
+   * never from the client payload — a client can only influence
+   * presentation metadata (dimensions, duration, thumbnail, view-once).
+   * Attachments with no matching confirmed intent (legacy rows, or other
+   * upload paths that don't create one) fall back to trusting the payload,
+   * preserving prior behaviour.
+   */
+  private async normalizeAttachments(
+    input: any,
+    ctx: { senderId: string },
+  ): Promise<any[] | undefined> {
     if (!Array.isArray(input) || !input.length) return undefined
 
-    return input.map((a: any) => ({
-      id: a.id,
-      url: a.url,
-      originalName: a.originalName ?? a.name ?? a.filename,
-      mimeType: a.mimeType ?? a.mime,
-      size: a.size,
-      kind: a.kind,
-      width: a.width,
-      height: a.height,
-      durationMs: a.durationMs,
-      thumbUrl: a.thumbUrl,
-      expiresAt: a.expiresAt ?? undefined,
-      expired: a.expired ?? false,
-      viewOnce: a.viewOnce ?? false,
-      viewedAt: a.viewedAt ?? undefined,
-    }))
+    const ids = input
+      .map((a: any) => a?.id)
+      .filter((id: any): id is string => typeof id === 'string' && id.length > 0)
+
+    const intentsById = new Map<string, UploadIntentDocument>()
+    if (ids.length) {
+      const intents = await this.uploadIntentModel
+        .find({ attachmentId: { $in: ids }, status: 'confirmed' })
+        .exec()
+      for (const intent of intents) {
+        if (intent.attachmentId) intentsById.set(intent.attachmentId, intent)
+      }
+    }
+
+    return input.map((a: any) => {
+      const intent = typeof a?.id === 'string' ? intentsById.get(a.id) : undefined
+
+      // An attachment id that resolves to someone else's confirmed upload
+      // can never be attached by this sender — prevents splicing another
+      // user's private attachment id into a message they didn't create.
+      // (The original uploader may still forward their own upload freely.)
+      if (intent && intent.ownerId !== ctx.senderId) {
+        throw new BadRequestException('Attachment does not belong to this sender.')
+      }
+
+      const confirmed = (intent?.confirmedAttachment ?? {}) as Record<string, unknown>
+
+      return {
+        id: a.id,
+        url: a.url,
+        storageKey: intent?.objectKey ?? a.storageKey,
+        originalName: intent?.originalFilename ?? (a.originalName ?? a.name ?? a.filename),
+        mimeType: intent?.contentType ?? (a.mimeType ?? a.mime),
+        size: intent?.sizeBytes ?? a.size,
+        kind: a.kind,
+        width: a.width,
+        height: a.height,
+        durationMs: a.durationMs,
+        thumbUrl: a.thumbUrl,
+        expiresAt: a.expiresAt ?? undefined,
+        expired: a.expired ?? false,
+        viewOnce: a.viewOnce ?? false,
+        viewedAt: a.viewedAt ?? undefined,
+        scanStatus: (confirmed.scanStatus as string | undefined) ?? a.scanStatus,
+        quarantined: (confirmed.quarantined as boolean | undefined) ?? a.quarantined ?? false,
+      }
+    })
   }
 }

@@ -4,6 +4,7 @@ import {
   Body,
   Controller,
   Get,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -19,6 +20,7 @@ import { StorageService } from '../storage/storage.service';
 import { HttpAuthGuard } from '../auth/http-auth.guard';
 import { LocalStorageService, verifyLocalPresignToken } from '../storage/local-storage.service';
 import { UploadIntentService } from './upload-intent.service';
+import { AttachmentAccessService } from './attachment-access.service';
 import { InitiateUploadDto, ConfirmUploadDto } from './upload-intent.dto';
 import {
   ATTACHMENT_TTL_DAYS,
@@ -82,23 +84,103 @@ const mimeMatchesMagic = (declaredMime: string, buf: Buffer): boolean => {
 
 @Controller('uploads')
 export class UploadsController {
+  private readonly logger = new Logger(UploadsController.name);
+
   constructor(
     private readonly storage: StorageService,
     private readonly uploadIntents: UploadIntentService,
+    private readonly attachmentAccess: AttachmentAccessService,
   ) {}
 
-  // No auth required on download — keys contain random UUIDs so they are
-  // not guessable, and removing auth eliminates the Django introspect
-  // round-trip that was causing image-load timeouts on Render.com free tier.
+  private originFor(req: FastifyRequest): string {
+    const host = req.headers?.host;
+    const proto = (req.headers?.['x-forwarded-proto'] as string) || (req as any).protocol || 'http';
+    return host ? `${proto}://${host}` : '';
+  }
+
+  // Safe dev-mode diagnostics for the receiver download flow. Deliberately
+  // excludes bearer tokens and signed-URL query strings (both may contain
+  // credentials/signatures) — only structural facts get logged.
+  private logDownload(stage: string, details: Record<string, unknown>) {
+    if ((process.env.NODE_ENV ?? '').toLowerCase() === 'production') return;
+    this.logger.debug(`[download:${stage}] ${JSON.stringify(details)}`);
+  }
+
+  // DEPRECATED — kept only for backward compatibility with attachments
+  // persisted before the id-based download flow existed, and with any
+  // already-cached client-side links. New downloads must use
+  // GET /uploads/:attachmentId/download-url. Unlike the old version of this
+  // route, it is now authenticated and re-validates conversation
+  // membership/expiry/quarantine via AttachmentAccessService — a raw key is
+  // no longer sufficient on its own to read a file.
   @Get('file')
-  async download(@Query('key') key: string, @Res() reply: FastifyReply) {
+  @UseGuards(HttpAuthGuard)
+  async download(@Req() req: FastifyRequest, @Query('key') key: string, @Res() reply: FastifyReply) {
     if (!key) {
       throw new BadRequestException('A file key is required.');
     }
-    const file = await this.storage.getFile(key);
-    const publicStorage = this.storage.isPublic();
-    reply.header('cache-control', publicStorage ? 'public, max-age=31536000, immutable' : 'private, max-age=0, no-store');
-    reply.type(file.mime || 'application/octet-stream');
+    const principal = (req as any).principal;
+    this.logDownload('legacy_key_request', { hasKey: !!key, keyLength: key.length });
+    const resolved = await this.attachmentAccess.resolveForLegacyKeyDownload(key, principal);
+    const file = await this.storage.getFile(resolved.storageKey);
+    reply.header('cache-control', 'private, max-age=0, no-store');
+    reply.header('content-disposition', `attachment; filename="${resolved.originalName.replace(/[\r\n"]+/g, '_')}"`);
+    reply.type(file.mime || resolved.mimeType || 'application/octet-stream');
+    if (file.size !== undefined) {
+      reply.header('content-length', String(file.size));
+    }
+    return reply.send(file.body);
+  }
+
+  // Primary receiver download path. Requires the normal auth guard, then
+  // AttachmentAccessService verifies conversation membership plus
+  // expiry/quarantine/view-once state before ever touching storage.
+  @Get(':attachmentId/download-url')
+  @UseGuards(HttpAuthGuard)
+  async getDownloadUrl(@Req() req: FastifyRequest, @Param('attachmentId') attachmentId: string) {
+    const principal = (req as any).principal;
+    this.logDownload('download_url_request', {
+      attachmentId,
+      hasPrincipal: !!principal?.userId,
+      endpoint: `GET /uploads/${attachmentId}/download-url`,
+    });
+    try {
+      const resolved = await this.attachmentAccess.resolveForDownloadUrl(attachmentId, principal, this.originFor(req));
+      this.logDownload('download_url_resolved', {
+        attachmentId,
+        originalName: resolved.originalName,
+        mimeType: resolved.mimeType,
+        size: resolved.size,
+        expiresInSeconds: resolved.expiresInSeconds,
+      });
+      return resolved;
+    } catch (error: any) {
+      this.logDownload('download_url_error', {
+        attachmentId,
+        errorName: error?.name,
+        errorMessage: error?.message,
+        status: error?.getStatus?.(),
+      });
+      throw error;
+    }
+  }
+
+  // Authenticated byte stream for local-filesystem storage (dev/self-hosted
+  // deployments without S3), so local mode follows the same authorization
+  // contract as the S3 presigned-GET path instead of trusting a raw path.
+  @Get(':attachmentId/stream')
+  @UseGuards(HttpAuthGuard)
+  async streamAttachment(
+    @Req() req: FastifyRequest,
+    @Param('attachmentId') attachmentId: string,
+    @Res() reply: FastifyReply,
+  ) {
+    const principal = (req as any).principal;
+    const resolved = await this.attachmentAccess.resolveForStream(attachmentId, principal);
+    const file = await this.storage.getFile(resolved.storageKey);
+    reply.header('cache-control', 'private, max-age=0, no-store');
+    reply.header('content-disposition', `attachment; filename="${resolved.originalName.replace(/[\r\n"]+/g, '_')}"`);
+    reply.type(file.mime || resolved.mimeType || 'application/octet-stream');
     if (file.size !== undefined) {
       reply.header('content-length', String(file.size));
     }
@@ -108,6 +190,7 @@ export class UploadsController {
   @Post('file')
   @UseGuards(HttpAuthGuard)
   async upload(@Req() req: FastifyRequest) {
+    const userId = (req as any).principal?.userId;
     // Parse a single file via @fastify/multipart
     // (FastifyRequest doesn't know .file() unless you wire generics; simplest is cast)
     const mp: any = await (req as any).file();
@@ -210,7 +293,8 @@ export class UploadsController {
     const expiresAt = new Date(Date.now() + ATTACHMENT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     const attachmentResponse: Record<string, unknown> = {
-      id: stored.key,
+      // id is filled in below once the UploadIntent tracking record exists —
+      // never the raw storage key (stored.key stays server-side only).
       url: primaryUrl,
       publicUrl: primaryPublicUrl,
       displayUrl: primaryUrl,
@@ -234,6 +318,17 @@ export class UploadsController {
     if (videoCategory) {
       attachmentResponse.video_category = videoCategory;
     }
+
+    const attachmentId = await this.uploadIntents.recordDirectUpload({
+      ownerId: userId,
+      objectKey: stored.key,
+      contentType: stored.mime,
+      originalFilename: stored.name,
+      sizeBytes: stored.size,
+      attachment: attachmentResponse,
+    });
+    attachmentResponse.id = attachmentId;
+    attachmentResponse.storageKey = stored.key;
 
     return {
       ok: true,
