@@ -18,7 +18,7 @@ import {
   BroadcastConversationSchema,
 } from './features/broadcasts/broadcast-conversation.schema'
 
-import { MessagesService } from './features/messages/messages.service'
+import { MessagesModule } from './features/messages/messages.module'
 import { ReactionsService } from './features/reactions/reactions.service'
 import { ReceiptsService } from './features/receipts/receipts.service'
 import { SyncService } from './features/sync/sync.service'
@@ -67,12 +67,24 @@ import { SfuModule } from '../realtime/sfu/sfu.module'
     // ✅ makes HttpService available for DjangoConversationClient/DjangoSeqClient
     HttpModule,
 
-    // shared Message model
+    // Message model is still needed directly here for ReactionsService and
+    // ReceiptsService (both @InjectModel(Message.name) consumers declared
+    // as providers below); ConversationKey/BroadcastConversation likewise
+    // back E2eeKeysService/BroadcastConversationsService. MessagesService
+    // itself now comes exclusively from MessagesModule below — see its
+    // module for the Message + UploadIntent registration it owns.
     MongooseModule.forFeature([
       { name: Message.name, schema: MessageSchema },
       { name: ConversationKey.name, schema: ConversationKeySchema },
       { name: BroadcastConversation.name, schema: BroadcastConversationSchema },
     ]),
+
+    // Owns MessagesService (and its Message + UploadIntent model
+    // registrations) so every consumer — ChatGateway, SyncService,
+    // BroadcastsController, feeds.module's FeedsController — shares the
+    // single correctly-wired instance instead of ChatModule constructing
+    // its own incomplete copy.
+    MessagesModule,
 
     ThreadsModule,
     PinsModule,
@@ -102,7 +114,9 @@ import { SfuModule } from '../realtime/sfu/sfu.module'
     HttpAuthGuard,
 
     // Batch A services
-    MessagesService,
+    // MessagesService is provided by the imported MessagesModule (see
+    // imports above) — do not re-provide it here, that's what created a
+    // second instance missing the UploadIntent model registration.
     ReactionsService,
     ReceiptsService,
     SyncService,
