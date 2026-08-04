@@ -64,6 +64,29 @@ const StyledTextSchema = SchemaFactory.createForClass(StyledText);
 @Schema({ _id: false })
 class VoiceMeta {
   @Prop({ required: true, min: 1 }) durationMs!: number;
+
+  // Canonical voice-attachment metadata — previously ONLY durationMs was
+  // declared here, so Mongoose subdocument casting silently stripped
+  // voice.url (and everything else) from every message the instant it
+  // saved, regardless of what the client sent. That made every voice note
+  // unplayable for receivers (who only ever read the persisted document)
+  // and, intermittently, for senders too. All optional for backward
+  // compatibility with rows already persisted before this field existed —
+  // see requestVoiceMediaUrl-style refresh logic on the RN side, which
+  // must tolerate an absent url on old messages.
+  @Prop() id?: string;
+  @Prop() url?: string;
+  /** Django MediaAsset.id — the permanent identity used to refresh an
+   * expired url (see voice-playback.service.ts). NOT a raw storage key. */
+  @Prop() mediaAssetId?: string;
+  /** Display/back-compat only, mirrors Attachment.storageKey — Django never
+   * returns the real S3 key to a client, so this is not a trustworthy key. */
+  @Prop() objectKey?: string;
+  @Prop() originalName?: string;
+  @Prop() mimeType?: string;
+  @Prop({ min: 0 }) size?: number;
+  @Prop({ type: [Number], default: undefined }) waveform?: number[];
+  @Prop() urlExpiresAt?: string;
 }
 const VoiceMetaSchema = SchemaFactory.createForClass(VoiceMeta);
 

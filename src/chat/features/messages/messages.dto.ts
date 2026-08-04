@@ -50,6 +50,41 @@ export class StyledTextDto {
 export class VoiceDto {
   @IsInt() @Min(1) @Max(60 * 60 * 1000)
   durationMs!: number;
+
+  // Canonical voice-attachment metadata. Previously this class declared
+  // ONLY durationMs — Mongoose subdocument casting silently strips any
+  // field not declared on the schema/DTO, so a client-sent voice.url was
+  // discarded the instant a message saved, regardless of what the sender
+  // actually uploaded. That was the root cause of voice notes being
+  // unplayable for receivers (who only ever see the persisted, stripped
+  // document) and, intermittently, for senders themselves (once their own
+  // view re-derives from the same persisted/broadcast shape rather than
+  // their local optimistic draft). All optional for backward compatibility
+  // with any already-deployed client build that still sends only
+  // {durationMs} — new sends always populate the rest, see
+  // apps: KIS RN uploadFileToBackend.ts / ChatRoomHandlers.tsx.
+  @IsOptional() @IsString() id?: string;
+  @IsOptional() @IsString() url?: string;
+  // Django's MediaAsset.id (UUID) — the PERMANENT identity used to refresh
+  // an expired playback url via GET /chat/messages/:messageId/voice/playback-url
+  // (see voice-playback.service.ts). This is what Django's internal
+  // chat-voice-sign endpoint looks the asset up by; `objectKey` below is
+  // kept for backward compat / display only — Django's UploadFileView never
+  // actually returns the real S3 key to a client, so this field is
+  // populated with the same asset id today (see buildVoiceAttachment.ts on
+  // the RN side) rather than a real storage key. Never trust either field
+  // as a substitute for the server re-deriving the object from the
+  // persisted message — see voice-playback.service.ts.
+  @IsOptional() @IsString() mediaAssetId?: string;
+  @IsOptional() @IsString() objectKey?: string;
+  @IsOptional() @IsString() originalName?: string;
+  @IsOptional() @IsString() mimeType?: string;
+  @IsOptional() @IsInt() @Min(0) size?: number;
+  @IsOptional() @IsArray() waveform?: number[];
+  // ISO-8601. Purely advisory for the client's own cache-freshness check —
+  // never trusted server-side; the server always re-validates via Django at
+  // refresh time regardless of what this says.
+  @IsOptional() @IsString() urlExpiresAt?: string;
 }
 
 export class StickerDto {
