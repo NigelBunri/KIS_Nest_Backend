@@ -25,7 +25,7 @@ export class MessagesService {
     senderName?: string
     seq: number
     input: SendMessageDto
-  }): Promise<MessageDocument> {
+  }): Promise<MessageDocument & { __reused?: boolean }> {
     const { senderId, senderDeviceId, seq, input } = params
 
     this.assertKindPayloadConsistency(input)
@@ -34,7 +34,13 @@ export class MessagesService {
       conversationId: input.conversationId,
       clientId: input.clientId,
     })
-    if (existing) return existing
+    if (existing) {
+      // Tell callers this clientId was already persisted (a retried/duplicate
+      // send, e.g. after a socket reconnect that resent an unacked message) so
+      // they can skip re-running post-send side effects like push notifications.
+      ;(existing as any).__reused = true
+      return existing
+    }
 
     const previewText = this.buildPreview(input)
     const created = new this.messageModel({
@@ -83,7 +89,10 @@ export class MessagesService {
           conversationId: input.conversationId,
           clientId: input.clientId,
         })
-        if (again) return again
+        if (again) {
+          ;(again as any).__reused = true
+          return again
+        }
       }
       throw e
     }
@@ -100,7 +109,7 @@ export class MessagesService {
     clientId: string
     seq: number
     input: SendMessagePayload
-  }): Promise<{ id: string; seq: number; createdAt: Date; dto: any }> {
+  }): Promise<{ id: string; seq: number; createdAt: Date; dto: any; reused: boolean }> {
     // Convert payload into legacy DTO shape.
     // Most fields already match names; keep as any for now to unblock compile.
     const rawMedia = (args.input as any).media && typeof (args.input as any).media === 'object'
@@ -132,11 +141,12 @@ export class MessagesService {
 
     const id = (doc as any).id ?? (doc as any)._id?.toString?.() ?? String((doc as any)._id)
     const createdAt = (doc as any).createdAt ?? new Date()
+    const reused = (doc as any).__reused === true
 
     // If you have a mapper, plug it here. For now, emit doc as DTO.
     const dto = doc
 
-    return { id, seq: args.seq, createdAt, dto }
+    return { id, seq: args.seq, createdAt, dto, reused }
   }
 
   /* ==========================================================================

@@ -1,4 +1,4 @@
-import { Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
 import { DjangoAuthService } from '../auth/django-auth.service';
 import { DeviceTokensService } from './device-tokens.service';
 
@@ -10,6 +10,11 @@ type RegisterTokenBody = {
   token_type?: 'fcm' | 'voip';
 };
 
+type UnregisterTokenBody = {
+  token?: string;
+  deviceId?: string;
+};
+
 @Controller('notifications')
 export class NotificationsController {
   constructor(
@@ -17,11 +22,7 @@ export class NotificationsController {
     private readonly tokens: DeviceTokensService,
   ) {}
 
-  @Post('tokens/register')
-  async registerToken(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() body: RegisterTokenBody,
-  ) {
+  private async authenticate(authorization: string | undefined): Promise<string> {
     const token = authorization?.startsWith('Bearer ')
       ? authorization.slice('Bearer '.length)
       : undefined;
@@ -29,6 +30,15 @@ export class NotificationsController {
 
     const principal = await this.auth.introspect(token);
     if (!principal?.userId) throw new UnauthorizedException('Invalid auth token');
+    return String(principal.userId);
+  }
+
+  @Post('tokens/register')
+  async registerToken(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: RegisterTokenBody,
+  ) {
+    const userId = await this.authenticate(authorization);
 
     const pushToken = body?.token ? String(body.token) : '';
     const platform = body?.platform ?? 'android';
@@ -36,12 +46,40 @@ export class NotificationsController {
     if (!pushToken) return { ok: false, reason: 'token_required' };
 
     await this.tokens.upsert({
-      userId: String(principal.userId),
+      userId,
       token: pushToken,
       platform,
       deviceId: body?.deviceId,
       tokenType,
     });
+
+    return { ok: true };
+  }
+
+  // Logout / account-deletion cleanup. Deactivates (not deletes — keeps the
+  // row for audit/debugging, matching Django's soft-delete convention for
+  // the same concept) either one exact token, or every token registered
+  // for a deviceId if the caller only has that left (e.g. local storage
+  // was already partly cleared before this call went out).
+  @Post('tokens/unregister')
+  async unregisterToken(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: UnregisterTokenBody,
+  ) {
+    const userId = await this.authenticate(authorization);
+
+    const pushToken = body?.token ? String(body.token) : '';
+    const deviceId = body?.deviceId ? String(body.deviceId) : '';
+    if (!pushToken && !deviceId) {
+      throw new BadRequestException('token or deviceId is required');
+    }
+
+    if (pushToken) {
+      await this.tokens.deactivate({ userId, token: pushToken });
+    }
+    if (deviceId) {
+      await this.tokens.deactivateForDevice({ userId, deviceId });
+    }
 
     return { ok: true };
   }

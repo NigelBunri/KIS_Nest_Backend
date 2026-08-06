@@ -180,6 +180,10 @@ export interface MessagesDeps {
       seq: number
       createdAt: Date
       dto: any
+      // True when this clientId was already persisted by an earlier call
+      // (a retried/duplicate send) — callers must skip post-send side
+      // effects (push notifications, webhook dispatch, etc.) in that case.
+      reused?: boolean
     }>
 
     editMessage(args: {
@@ -398,9 +402,18 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         }
       }
 
-      _postSendSideEffects().catch((e: any) =>
-        logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
-      )
+      if (created.reused) {
+        // This clientId was already persisted by an earlier call (e.g. the
+        // client resent EVT.SEND after a socket reconnect because it never
+        // received the first ack) — updateLastMessage/dispatchWebhook/
+        // notifyNewMessage already ran once for this message. Re-running them
+        // would dispatch a duplicate outbound webhook and a duplicate push.
+        logger.log(`[messages] skipping post-send side effects for reused clientId=${clientId} serverId=${created.id}`)
+      } else {
+        _postSendSideEffects().catch((e: any) =>
+          logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
+        )
+      }
     } catch (e: any) {
       const context = {
         event: EVT.SEND,

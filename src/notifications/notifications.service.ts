@@ -54,6 +54,16 @@ export class NotificationsService implements OnModuleInit {
     }
   }
 
+  /** Non-secret provider status for the /health endpoint — never expose
+   * credential values, only whether each provider initialized. */
+  getProviderStatus() {
+    return {
+      fcm_configured: !(this.provider instanceof DummyPushProvider),
+      apns_voip_configured: this.apnsVoip !== null,
+      active_push_provider: this.provider instanceof DummyPushProvider ? 'dummy' : 'fcm',
+    };
+  }
+
   async notify(target: PushTarget, msg: PushMessage) {
     const tokenList = target.deviceTokens?.length
       ? target.deviceTokens

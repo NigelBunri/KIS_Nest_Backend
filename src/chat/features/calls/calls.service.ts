@@ -243,14 +243,19 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async createCallOrThrowIfActiveInConversation(args: UpsertCallArgs): Promise<CallSession> {
+  async createCallOrThrowIfActiveInConversation(
+    args: UpsertCallArgs,
+  ): Promise<CallSession & { __reused?: boolean }> {
     // Idempotent: same callId was already created (reconnect / duplicate emit) — return it.
     const existingById = await this.calls
       .findOne({ conversationId: args.conversationId, callId: args.callId })
       .lean()
     if (existingById) {
       this.logger.debug(`[calls] createCall idempotent return callId=${args.callId}`)
-      return existingById as CallSession
+      // __reused tells the caller this call.offer was already processed once —
+      // e.g. a client resent it after a socket reconnect — so it must not
+      // send a second round of incoming-call push notifications.
+      return { ...(existingById as CallSession), __reused: true }
     }
 
     // If another call is active for this conversation, auto-end it when it is
@@ -746,10 +751,16 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       .find({ status: { $in: ['ringing'] }, startedAt: { $lt: ringingCutoff }, isActiveInConversation: true })
       .lean()
     for (const call of staleRinging) {
-      await this.calls.updateOne(
+      // Guard against duplicate missed-call pushes if this tick overlaps a
+      // still-running previous tick (cleanupStaleCalls has no run-time cap
+      // relative to the 30s interval) or another server instance runs the
+      // same cleanup concurrently: only the update that actually flips the
+      // status away from 'missed' is allowed to notify.
+      const result = await this.calls.updateOne(
         { conversationId: call.conversationId, callId: call.callId, status: { $ne: 'missed' } },
         { $set: { status: 'missed', endedAt: now, isActiveInConversation: false } },
       )
+      if (!result.modifiedCount) continue
       this.logger.log(`[calls] cleanup: ringing timeout callId=${call.callId}`)
       if (this._notificationsService) {
         const unanswered = call.participants.filter(

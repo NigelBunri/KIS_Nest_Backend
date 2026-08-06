@@ -255,6 +255,11 @@ function createCallHandler(
         event === EVT.CALL_OFFER && Array.isArray(payload?.inviteeUserIds)
           ? payload.inviteeUserIds.map(String).filter((id) => id && id !== principal.userId)
           : []
+      // Set true below when this call.offer is a duplicate/retried emit for a
+      // callId that already exists (e.g. a client resending after a socket
+      // reconnect) — in that case invitees were already pushed once and must
+      // not be pushed again.
+      let offerWasReused = false
 
       if (callId && deps.callsService) {
         if (event === EVT.CALL_OFFER) {
@@ -262,7 +267,7 @@ function createCallHandler(
           const media = typeof payload?.media === 'string' ? payload.media : undefined
 
           if (deps.callsService.createCallOrThrowIfActiveInConversation) {
-            await deps.callsService.createCallOrThrowIfActiveInConversation({
+            const callDoc = await deps.callsService.createCallOrThrowIfActiveInConversation({
               conversationId,
               callId,
               createdBy: principal.userId,
@@ -270,6 +275,7 @@ function createCallHandler(
               media,
               inviteeUserIds: offerInviteeIds,
             })
+            offerWasReused = (callDoc as any)?.__reused === true
           } else if (deps.callsService.upsertState) {
             await deps.callsService.upsertState({ conversationId, state: payload as Record<string, unknown> })
           }
@@ -439,7 +445,9 @@ function createCallHandler(
           safeEmit(server, rooms.userRoom(uid), EVT.CALL_OFFER, enrichedPayload)
           server.in(rooms.userRoom(uid)).socketsJoin(rooms.convRoom(conversationId))
           // Fire-and-forget push notification so offline/backgrounded recipients are woken up.
-          if (deps.notificationsService && callId) {
+          // Skipped on a reused/duplicate offer (retry, socket reconnect resend)
+          // — the invitee was already pushed once for this callId.
+          if (deps.notificationsService && callId && !offerWasReused) {
             deps.notificationsService.notifyIncomingCall({
               toUserId: uid,
               fromUserId: principal.userId,

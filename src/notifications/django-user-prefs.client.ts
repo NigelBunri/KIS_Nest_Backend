@@ -23,16 +23,27 @@ export class DjangoUserPrefsClient {
     const base = String(process.env.DJANGO_API_URL ?? process.env.API_BASE_URL ?? '').replace(/\/+$/, '')
     if (!base) return null
 
-    const url = `${base}/api/v1/profile-preferences/me/`
+    // Trusted-internal endpoint (apps.chat.internal_auth on the Django
+    // side) — NOT /api/v1/profile-preferences/me/. That route requires a
+    // real per-user JWT (DeviceBoundJWTAuthentication); this service has
+    // never sent one, only the internal HMAC headers below, so every call
+    // to /me/ always 401s there. This was a genuine bug: the DND/mute
+    // check below has never actually been enforced in production — every
+    // push has gone out as if no preference was ever set. See
+    // apps/accounts/views_internal.py::NotificationPreferencesInternalView
+    // on the Django side.
+    const url = `${base}/profile-preferences/internal/notification-prefs/`
 
     try {
       const res = await firstValueFrom(
         this.http.get<Record<string, any>>(url, {
+          params: { user_id: userId },
           headers: {
             'X-Internal-User-Id': userId,
             ...signedInternalHeaders({
               method: 'GET',
               url,
+              params: { user_id: userId },
               secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
             }),
           },

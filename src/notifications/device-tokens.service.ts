@@ -18,6 +18,18 @@ export class DeviceTokensService {
     deviceId?: string;
     tokenType?: 'fcm' | 'voip';
   }) {
+    // A push token is tied to an app INSTALL, not a user — the common
+    // "log out, a different person logs into the same device" case can
+    // hand this exact token string to a new userId without FCM ever
+    // rotating it. `token` alone has its own unique index (schema.ts), so
+    // a plain upsert keyed on {userId, token} would try to INSERT a new
+    // doc while an old doc for the previous owner still holds that token
+    // string — a duplicate-key error (E11000), uncaught, surfacing as an
+    // unhandled 500 on every re-registration in that scenario. Correct
+    // WhatsApp-like behavior: the token belongs to whoever is currently
+    // logged in on that install, so reassign it — deleting any other
+    // user's row for this exact token first makes that safe.
+    await this.model.deleteMany({ token: input.token, userId: { $ne: input.userId } });
     await this.model.updateOne(
       { userId: input.userId, token: input.token },
       {
@@ -40,6 +52,17 @@ export class DeviceTokensService {
       { $set: { active: false } },
     );
     return { ok: true };
+  }
+
+  // Logout/account-deletion cleanup for a whole device install — both its
+  // fcm and voip rows, in case the client only has the deviceId left (e.g.
+  // local storage was partly cleared) rather than every exact token value.
+  async deactivateForDevice(input: { userId: string; deviceId: string }) {
+    const result = await this.model.updateMany(
+      { userId: input.userId, deviceId: input.deviceId },
+      { $set: { active: false } },
+    );
+    return { ok: true, deactivated: (result as any).modifiedCount ?? 0 };
   }
 
   async bulkDeactivate(tokens: string[]): Promise<number> {
