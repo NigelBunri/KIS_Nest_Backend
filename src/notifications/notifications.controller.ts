@@ -22,13 +22,13 @@ export class NotificationsController {
     private readonly tokens: DeviceTokensService,
   ) {}
 
-  private async authenticate(authorization: string | undefined): Promise<string> {
+  private async authenticate(authorization: string | undefined, deviceId?: string): Promise<string> {
     const token = authorization?.startsWith('Bearer ')
       ? authorization.slice('Bearer '.length)
       : undefined;
     if (!token) throw new UnauthorizedException('Missing auth token');
 
-    const principal = await this.auth.introspect(token);
+    const principal = await this.auth.introspect(token, deviceId);
     if (!principal?.userId) throw new UnauthorizedException('Invalid auth token');
     return String(principal.userId);
   }
@@ -37,8 +37,9 @@ export class NotificationsController {
   async registerToken(
     @Headers('authorization') authorization: string | undefined,
     @Body() body: RegisterTokenBody,
+    @Headers('x-device-id') deviceIdHeader?: string,
   ) {
-    const userId = await this.authenticate(authorization);
+    const userId = await this.authenticate(authorization, deviceIdHeader);
 
     const pushToken = body?.token ? String(body.token) : '';
     const platform = body?.platform ?? 'android';
@@ -65,8 +66,9 @@ export class NotificationsController {
   async unregisterToken(
     @Headers('authorization') authorization: string | undefined,
     @Body() body: UnregisterTokenBody,
+    @Headers('x-device-id') deviceIdHeader?: string,
   ) {
-    const userId = await this.authenticate(authorization);
+    const userId = await this.authenticate(authorization, deviceIdHeader);
 
     const pushToken = body?.token ? String(body.token) : '';
     const deviceId = body?.deviceId ? String(body.deviceId) : '';

@@ -1,6 +1,6 @@
 // src/chat/integrations/django/django-conversation.client.ts
 
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import {
@@ -9,6 +9,7 @@ import {
   isBroadcastConversation,
 } from '../../chat.types';
 import { signedInternalHeaders } from '../../../security/internal-signing';
+import { MetricsService } from '../../../observability/metrics.service';
 
 export interface DjangoWsPermsResponse {
   isMember: boolean;
@@ -40,7 +41,11 @@ function applyConversationIdTemplate(url: string | undefined, conversationId: st
 
 @Injectable()
 export class DjangoConversationClient {
-  constructor(private readonly http: HttpService) {}
+  constructor(
+    private readonly http: HttpService,
+    private readonly metrics: MetricsService,
+  ) {}
+  private readonly logger = new Logger(DjangoConversationClient.name);
   private readonly permsCache = new Map<
     string,
     { expiresAt: number; staleUntil: number; data: DjangoWsPermsResponse }
@@ -50,6 +55,21 @@ export class DjangoConversationClient {
   );
   // How long stale entries are kept as a fallback when Django is unreachable
   private readonly permsStaleTtlMs = this.permsTtlMs * 10;
+
+  // Lightweight circuit breaker: after enough consecutive failures reaching
+  // Django's ws-perms endpoint, stop spending a full request timeout on
+  // every subsequent call for a cooldown window — fail closed immediately
+  // instead. This protects Nest.js's own responsiveness during a sustained
+  // Django outage; it never changes the fail-closed security posture below,
+  // it only changes how fast the denial happens.
+  private consecutiveFailures = 0;
+  private circuitOpenUntil = 0;
+  private readonly circuitFailureThreshold = Number(
+    process.env.DJANGO_CONV_PERMS_CIRCUIT_THRESHOLD ?? 5,
+  );
+  private readonly circuitCooldownMs = Number(
+    process.env.DJANGO_CONV_PERMS_CIRCUIT_COOLDOWN_MS ?? 15_000,
+  );
 
   private readonly memberIdsCache = new Map<
     string,
@@ -87,6 +107,18 @@ export class DjangoConversationClient {
       });
       return perms;
     }
+
+    if (this.circuitOpenUntil > now) {
+      if (cached && cached.staleUntil > now) {
+        return cached.data;
+      }
+      this.metrics.inc('chat_conversation_perms_fail_closed_total', { reason: 'circuit_open' });
+      this.logger.warn(
+        `[wsPerms] circuit open (${this.consecutiveFailures} recent failures) — denying userId=${principal.userId} conversationId=${conversationId}`,
+      );
+      throw new UnauthorizedException('Conversation permission check unavailable');
+    }
+
     const base = this.djangoApiBase();
     const url =
       applyConversationIdTemplate(process.env.DJANGO_CONV_PERMS_URL, conversationId) ??
@@ -120,6 +152,10 @@ export class DjangoConversationClient {
       );
 
       const data = res.data;
+      // A successful round trip clears the circuit breaker regardless of
+      // its result — only actual reachability failures should trip it.
+      this.consecutiveFailures = 0;
+      this.circuitOpenUntil = 0;
       // Only cache positive membership results. A false result may mean the
       // group was just created and the member record hasn't propagated yet —
       // caching it for 2 minutes would lock out a brand-new group owner.
@@ -132,24 +168,44 @@ export class DjangoConversationClient {
       }
       return data;
     } catch (err: any) {
-      // Serve stale cache first — covers most cold-start windows
+      // Serve stale cache first — this is a legitimate resilience
+      // mechanism, not a fail-open: it only ever replays a membership
+      // result Django itself already confirmed, within a bounded window.
       if (cached && cached.staleUntil > now) {
         return cached.data;
       }
-      // Explicit 4xx from Django (bad token, forbidden) — hard block
+
       const httpStatus: number | undefined = err?.response?.status;
+      const reason = httpStatus ? `http_${httpStatus}` : 'network_error';
+
+      // Explicit 4xx from Django (bad token, forbidden) — hard block, and
+      // does not count toward the circuit breaker (Django is reachable and
+      // answering; the caller's credentials are the problem, not Django).
       if (httpStatus && httpStatus >= 400 && httpStatus < 500) {
+        this.metrics.inc('chat_conversation_perms_fail_closed_total', { reason });
+        this.logger.warn(
+          `[wsPerms] Django rejected the permission check (status=${httpStatus}) — denying userId=${principal.userId} conversationId=${conversationId}`,
+        );
         throw new UnauthorizedException('Conversation permission check failed');
       }
-      // Network error / timeout / 5xx — Django is unreachable, allow through
-      // rather than killing every call during a cold start.
-      const fallback: DjangoWsPermsResponse = { isMember: true, isBlocked: false, canSend: true };
-      this.permsCache.set(cacheKey, {
-        expiresAt: now + 30_000,
-        staleUntil: now + this.permsStaleTtlMs,
-        data: fallback,
-      });
-      return fallback;
+
+      // Network error / timeout / 5xx — Django is unreachable or failing.
+      // Previously this fabricated {isMember:true, canSend:true} here,
+      // treating "we don't know" as "yes". Deny instead: an authorization
+      // check that can't be confirmed must never be assumed to have
+      // passed. No token content is logged, only identifiers.
+      this.consecutiveFailures += 1;
+      if (this.consecutiveFailures >= this.circuitFailureThreshold && this.circuitOpenUntil <= now) {
+        this.circuitOpenUntil = now + this.circuitCooldownMs;
+        this.logger.error(
+          `[wsPerms] opening circuit after ${this.consecutiveFailures} consecutive failures reaching Django conversation-perms endpoint`,
+        );
+      }
+      this.metrics.inc('chat_conversation_perms_fail_closed_total', { reason });
+      this.logger.warn(
+        `[wsPerms] Django unreachable (${reason}) — denying userId=${principal.userId} conversationId=${conversationId}: ${err?.message ?? 'unknown error'}`,
+      );
+      throw new UnauthorizedException('Conversation permission check unavailable');
     }
   }
 

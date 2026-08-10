@@ -13,8 +13,8 @@ export class WsAuthGuard implements CanActivate {
     const token: string | undefined = client?.handshake?.auth?.token || bearer;
     if (!token) throw new UnauthorizedException('Missing token');
 
-    const principal = await this.auth.introspect(token);
     const deviceId = client?.handshake?.auth?.deviceId || client?.handshake?.headers?.['x-device-id'];
+    const principal = await this.auth.introspect(token, deviceId ? String(deviceId) : undefined);
     if (principal?.deviceId && deviceId && String(principal.deviceId) !== String(deviceId)) {
       throw new UnauthorizedException('Device mismatch');
     }

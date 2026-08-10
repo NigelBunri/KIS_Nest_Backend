@@ -5,6 +5,7 @@ import { MongooseModule } from '@nestjs/mongoose'
 import { HttpModule } from '@nestjs/axios' // ✅ required for HttpService
 
 import { AuthModule } from '../auth/auth.module'
+import { ObservabilityModule } from '../observability/observability.module'
 import { WsAuthGuard } from '../auth/ws-auth.guard'
 import { HttpAuthGuard } from '../auth/http-auth.guard'
 
@@ -66,6 +67,10 @@ import { SfuModule } from '../realtime/sfu/sfu.module'
 
     // ✅ makes HttpService available for DjangoConversationClient/DjangoSeqClient
     HttpModule,
+
+    // ✅ makes MetricsService available for DjangoConversationClient's
+    // fail-closed authorization-denial counters
+    ObservabilityModule,
 
     // Message model is still needed directly here for ReactionsService and
     // ReceiptsService (both @InjectModel(Message.name) consumers declared

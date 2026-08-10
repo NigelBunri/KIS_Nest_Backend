@@ -18,7 +18,8 @@ export class SearchController {
       throw new UnauthorizedException('Missing bearer token');
     }
     const token = authHeader.slice('Bearer '.length);
-    const principal = await this.authService.introspect(token);
+    const deviceId = req.headers['x-device-id'];
+    const principal = await this.authService.introspect(token, typeof deviceId === 'string' ? deviceId : undefined);
     return { principal, token };
   }
 

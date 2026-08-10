@@ -94,8 +94,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return;
       }
 
+      const deviceId =
+        (socket.handshake as any)?.auth?.deviceId ||
+        (socket.handshake?.headers as any)?.['x-device-id'];
+
       try {
-        principal = await this.authService.introspect(token);
+        principal = await this.authService.introspect(token, deviceId ? String(deviceId) : undefined);
       } catch (authErr: any) {
         this.logger.warn(
           `[WS] auth rejected socketId=${socket.id} reason=${authErr?.message ?? 'unknown'}`,
@@ -104,9 +108,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         socket.disconnect(true);
         return;
       }
-      const deviceId =
-        (socket.handshake as any)?.auth?.deviceId ||
-        (socket.handshake?.headers as any)?.['x-device-id'];
       (socket as any).principal = { ...principal, token, deviceId };
     }
 

@@ -11,12 +11,14 @@ import { HttpAuthGuard } from '../auth/http-auth.guard';
 import { StorageModule } from '../storage/storage.module';
 import { Message, MessageSchema } from '../chat/features/messages/schemas/message.schema';
 import { DjangoConversationClient } from '../chat/integrations/django/django-conversation.client';
+import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
   imports: [
     AuthModule,
     HttpModule,
     StorageModule,
+    ObservabilityModule,
     MongooseModule.forFeature([
       { name: Message.name, schema: MessageSchema },
       { name: UploadIntent.name, schema: UploadIntentSchema },

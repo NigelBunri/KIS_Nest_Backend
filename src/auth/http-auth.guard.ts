@@ -22,7 +22,11 @@ export class HttpAuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing token');
     }
 
-    const principal = await this.authService.introspect(bearer);
+    const deviceId = req?.headers?.['x-device-id'];
+    const principal = await this.authService.introspect(
+      bearer,
+      typeof deviceId === 'string' ? deviceId : undefined,
+    );
     req.principal = { ...principal, token: bearer };
     return true;
   }

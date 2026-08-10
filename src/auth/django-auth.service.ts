@@ -22,6 +22,22 @@ function ensureTrailingSlash(u: string) {
   return u.endsWith('/') ? u : u + '/';
 }
 
+/**
+ * Authoritative token validation for the whole Nest.js service (REST, WS,
+ * every controller below all funnel through introspect()).
+ *
+ * Design note (device revocation): a token that merely has a valid
+ * signature and hasn't expired is NOT sufficient to grant access — Django's
+ * /auth/introspect/ endpoint is the only thing that knows whether the
+ * device backing this token has since been revoked (logout, single-device
+ * revoke, bulk revoke). Local JWT decoding below exists ONLY as a fast
+ * local rejection of obviously-bad tokens (bad signature, expired) so a
+ * garbage token doesn't cost a network round trip — it is never, by
+ * itself, sufficient to accept a token. Only a successful Django round
+ * trip (live, or served from a short, bounded-TTL cache populated by one)
+ * authorizes access, and a network failure reaching Django never manufactures
+ * a session that was never actually validated.
+ */
 @Injectable()
 export class DjangoAuthService {
   private readonly sharedJwtSecret = (
@@ -32,10 +48,6 @@ export class DjangoAuthService {
   private readonly strictJwtClaims =
     ((process.env.DJANGO_JWT_STRICT ?? process.env.JWT_STRICT ?? '').trim() ||
       (process.env.NODE_ENV === 'production' ? '1' : '0')) === '1';
-  private readonly preferLocalJwt =
-    (process.env.DJANGO_LOCAL_JWT_FIRST ?? '').trim() === '1' ||
-    ((process.env.NODE_ENV ?? 'development') !== 'production' &&
-      Boolean(this.sharedJwtSecret));
   private readonly tokenIssuers = this.buildAllowedValues([
     process.env.DJANGO_JWT_ISSUER,
     process.env.JWT_ISSUER,
@@ -47,18 +59,70 @@ export class DjangoAuthService {
     process.env.JWT_AUDIENCE,
   ]);
 
-  async introspect(token: string): Promise<AuthPrincipal> {
-    if (this.preferLocalJwt) {
+  // Bounded revocation-propagation window: how long a successful
+  // introspection result may be reused before Django must be asked again.
+  // Keep short — this IS the upper bound on "how long after a device is
+  // revoked can it still act through Nest.js".
+  private readonly positiveTtlMs = Number(
+    process.env.DJANGO_INTROSPECT_CACHE_TTL_MS ?? 30_000,
+  );
+  // Resilience window for a token that was ALREADY validated recently, used
+  // only when Django is unreachable (network error/timeout/5xx) — never for
+  // a token with no prior successful validation, and never when Django
+  // gives an explicit rejection.
+  private readonly staleGraceMs = Number(
+    process.env.DJANGO_INTROSPECT_STALE_GRACE_MS ?? 90_000,
+  );
+  private readonly principalCache = new Map<
+    string,
+    { principal: AuthPrincipal; validatedAt: number }
+  >();
+
+  async introspect(token: string, deviceId?: string): Promise<AuthPrincipal> {
+    if (this.sharedJwtSecret) {
       try {
-        return this.mapPayloadToPrincipal(this.decodeAndValidateJwt(token));
-      } catch (localError) {
-        console.warn(
-          '⚠️ Local JWT verification failed; trying Django introspection',
-          localError,
-        );
+        this.decodeAndValidateJwt(token);
+      } catch (localError: any) {
+        throw new UnauthorizedException('Invalid token');
       }
     }
 
+    const cacheKey = this.cacheKeyFor(token, deviceId);
+    const now = Date.now();
+    const cached = this.principalCache.get(cacheKey);
+    if (cached && now - cached.validatedAt < this.positiveTtlMs) {
+      return cached.principal;
+    }
+
+    try {
+      const principal = await this.fetchFromDjango(token, deviceId);
+      this.principalCache.set(cacheKey, { principal, validatedAt: now });
+      return principal;
+    } catch (e) {
+      if (e instanceof UnauthorizedException) {
+        // Definitive rejection (or fatal misconfiguration) — never mask
+        // this behind a stale cache hit, and don't let a now-invalid
+        // token keep passing from cache for the rest of its TTL window.
+        this.principalCache.delete(cacheKey);
+        throw e;
+      }
+      // Network error / timeout / 5xx reaching Django. A token with no
+      // prior successful validation has no cache entry — deny outright
+      // rather than letting an unreachable Django manufacture a session
+      // that was never actually checked.
+      if (cached && now - cached.validatedAt < this.staleGraceMs) {
+        return cached.principal;
+      }
+      throw new UnauthorizedException('Invalid token');
+    }
+  }
+
+  private cacheKeyFor(token: string, deviceId?: string): string {
+    const hash = crypto.createHash('sha256').update(token).digest('hex');
+    return deviceId ? `${hash}:${deviceId}` : hash;
+  }
+
+  private async fetchFromDjango(token: string, deviceId?: string): Promise<AuthPrincipal> {
     const rawUrl = process.env.DJANGO_INTROSPECT_URL;
     if (!rawUrl) {
       throw new UnauthorizedException('DJANGO_INTROSPECT_URL is missing');
@@ -72,43 +136,39 @@ export class DjangoAuthService {
       ? new https.Agent({ rejectUnauthorized: !allowSelfSigned })
       : undefined;
 
-    try {
-      const { data, status } = await axios.get(url, {
-        headers: {
-          Authorization: `${scheme} ${token}`,
-          ...signedInternalHeaders({ method: 'GET', url, secret: internal }),
-          Accept: 'application/json',
-        },
-        timeout: 4000,
-        httpsAgent,
-      });
+    const headers: Record<string, string> = {
+      Authorization: `${scheme} ${token}`,
+      ...signedInternalHeaders({ method: 'GET', url, secret: internal }),
+      Accept: 'application/json',
+    };
+    // Optional — Nest is relaying a client's token, not originating the
+    // request, so there may be no device id to forward. Django's
+    // introspection endpoint cross-checks it when present but does not
+    // require it (see apps.accounts.jwt_auth.validate_device_bound_token).
+    if (deviceId) {
+      headers['X-Device-Id'] = deviceId;
+    }
 
+    try {
+      const { data, status } = await axios.get(url, { headers, timeout: 4000, httpsAgent });
       return this.mapDjangoPayload(data, status);
     } catch (e) {
       const err = e as AxiosError;
       const status = err.response?.status;
-      const body = err.response?.data;
       console.error('❌ Introspection error', {
         url,
         status,
-        body,
         scheme,
         token: redact(token),
       });
 
-      if (this.sharedJwtSecret && !this.preferLocalJwt) {
-        try {
-          const payload = this.decodeAndValidateJwt(token);
-          console.warn('⚠️ Falling back to local JWT verification', {
-            userId: payload?.user_id ?? payload?.sub,
-          });
-          return this.mapPayloadToPrincipal(payload);
-        } catch (localError) {
-          console.error('❌ Local JWT verification failed', localError);
-        }
+      if (status && status >= 400 && status < 500) {
+        throw new UnauthorizedException('Invalid token');
       }
-
-      throw new UnauthorizedException('Invalid token');
+      // Network error / timeout / 5xx — rethrow as-is (not
+      // UnauthorizedException) so introspect() can apply the bounded
+      // stale-cache grace window instead of an immediate hard failure.
+      throw e;
     }
   }
 
@@ -131,12 +191,14 @@ export class DjangoAuthService {
         .map((value) => String(value ?? '').trim())
         .find(Boolean) ?? 'User';
 
-    const isPremium = Boolean(
-      data?.isPremium ??
-        (typeof data?.tier === 'string' &&
-          data.tier.toLowerCase() !== 'basic') ??
-        data?.entitlements?.premium === true,
-    );
+    // Trust Django's isPremium directly — it's now computed from the
+    // database-backed AccountTier.rank hierarchy (apps.accounts.tiers.
+    // is_paid_tier_name), which is alias-aware (e.g. legacy "Basic" ->
+    // "Free") and always current. The stale local fallback this used to
+    // have — comparing the tier name against the literal string "basic" —
+    // was wrong ever since the free tier was renamed to "Free", and
+    // reported every free-tier user as premium.
+    const isPremium = Boolean(data?.isPremium);
 
     const scopes = Array.isArray(data?.scopes)
       ? data.scopes
@@ -157,7 +219,13 @@ export class DjangoAuthService {
     };
   }
 
-  private decodeAndValidateJwt(token: string) {
+  /**
+   * Fast local rejection only (signature/exp/nbf/iss/aud) — throws on an
+   * obviously-invalid token so it never costs a network round trip.
+   * Passing this check does NOT authorize anything by itself; only
+   * fetchFromDjango()'s result (live or cached) does.
+   */
+  private decodeAndValidateJwt(token: string): void {
     const parts = token.split('.');
     if (parts.length !== 3) {
       throw new Error('Invalid JWT format');
@@ -216,56 +284,12 @@ export class DjangoAuthService {
         );
       }
     }
-
-    return decoded;
   }
 
   private base64UrlDecode(value: string) {
     const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
     const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
     return Buffer.from(padded, 'base64').toString('utf8');
-  }
-
-  private mapPayloadToPrincipal(payload: Record<string, any>): AuthPrincipal {
-    const userId = String(
-      payload?.user_id ?? payload?.sub ?? payload?.id ?? '',
-    );
-    if (!userId) {
-      throw new UnauthorizedException('Token payload missing user id');
-    }
-
-    const username =
-      [
-        payload?.display_name,
-        payload?.username,
-        payload?.email ? (payload.email as string).split('@')[0] : '',
-      ]
-        .map((value) => String(value ?? '').trim())
-        .find(Boolean) ?? 'User';
-
-    const isPremium = Boolean(
-      payload?.isPremium ??
-        (typeof payload?.tier === 'string' &&
-          payload.tier.toLowerCase() !== 'basic'),
-    );
-
-    const scopes = Array.isArray(payload?.scopes)
-      ? payload.scopes
-      : payload?.entitlements && typeof payload.entitlements === 'object'
-        ? Object.keys(payload.entitlements).filter(
-            (k) => payload.entitlements[k] === true,
-          )
-        : [];
-
-    const deviceId = payload?.device_id ?? payload?.deviceId ?? undefined;
-
-    return {
-      userId,
-      username,
-      isPremium,
-      deviceId: deviceId ? String(deviceId) : undefined,
-      scopes,
-    };
   }
 
   private buildAllowedValues(values: Array<string | undefined>) {

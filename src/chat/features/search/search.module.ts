@@ -6,11 +6,13 @@ import { AuthModule } from '../../../auth/auth.module';
 import { HttpModule } from '@nestjs/axios';
 import { DjangoConversationClient } from '../../integrations/django/django-conversation.client';
 import { Message, MessageSchema } from '../messages/schemas/message.schema';
+import { ObservabilityModule } from '../../../observability/observability.module';
 
 @Module({
   imports: [
     AuthModule,
     HttpModule,
+    ObservabilityModule,
     MongooseModule.forFeature([{ name: Message.name, schema: MessageSchema }]),
   ],
   controllers: [SearchController],

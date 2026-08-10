@@ -12,12 +12,14 @@ import { HttpAuthGuard } from '../../../auth/http-auth.guard';
 import { DjangoConversationClient } from '../../integrations/django/django-conversation.client';
 import { DjangoMediaClient } from '../../integrations/django/django-media.client';
 import { RateLimitService } from '../../infra/rate-limit/rate-limit.service';
+import { ObservabilityModule } from '../../../observability/observability.module';
 
 
 @Module({
   imports: [
     AuthModule,
     HttpModule,
+    ObservabilityModule,
     MongooseModule.forFeature([
       { name: Message.name, schema: MessageSchema },
       { name: UploadIntent.name, schema: UploadIntentSchema },

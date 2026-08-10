@@ -64,9 +64,34 @@ export class MediaCleanupService implements OnApplicationBootstrap, OnApplicatio
         cleanupFailures++;
         this.logger.warn(`[MediaCleanup] Failed to delete abandoned key=${intent.objectKey}: ${e?.message}`);
       }
+
       intent.status = 'expired';
-      await intent.save();
-      expired++;
+      try {
+        await intent.save();
+        expired++;
+      } catch (e: any) {
+        // document.save() re-validates every required field on the document,
+        // not just the one being changed. A record created before `uploadId`
+        // became a required field (added in 59aadd5, with no backfill for
+        // pre-existing rows) fails that validation here. Left as a bare
+        // throw, this would abort the `for` loop entirely — leaving every
+        // other candidate in this batch unprocessed, and since a
+        // never-expired row keeps matching the same query, the same record
+        // would re-block every future run indefinitely. Fall back to a
+        // validation-free update so this legacy row still gets expired.
+        this.logger.warn(
+          `[MediaCleanup] intent.save() failed for id=${intent._id} (likely a legacy record predating a schema change): ${e?.message}. Retrying via direct update.`,
+        );
+        try {
+          await this.uploadIntentModel.updateOne({ _id: intent._id }, { $set: { status: 'expired' } }).exec();
+          expired++;
+        } catch (e2: any) {
+          cleanupFailures++;
+          this.logger.error(
+            `[MediaCleanup] Failed to force-expire malformed intent id=${intent._id}: ${e2?.message}`,
+          );
+        }
+      }
     }
 
     this.logger.log(`[MediaCleanup] Abandoned intents — expired=${expired} cleanupFailures=${cleanupFailures}`);
