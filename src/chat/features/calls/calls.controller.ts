@@ -14,13 +14,26 @@ import {
 import type { FastifyRequest } from 'fastify'
 import { CallsService } from './calls.service'
 import { DjangoAuthService } from '../../../auth/django-auth.service'
+import { DjangoConversationClient } from '../../integrations/django/django-conversation.client'
+import { RateLimitService } from '../../infra/rate-limit/rate-limit.service'
+import type { AuthPrincipal } from '../../../auth/django-auth.service'
 
 @Controller('calls')
 export class CallsController {
   constructor(
     private readonly callsService: CallsService,
     private readonly authService: DjangoAuthService,
+    private readonly djangoConversationClient: DjangoConversationClient,
+    private readonly rateLimit: RateLimitService,
   ) {}
+
+  // Standalone calls (`standalone:<callId>`) have no Django conversation
+  // record — same skip the socket call.offer handler uses (realtime/handlers
+  // /calls.ts) — so membership can only be asserted for real conversations.
+  private async assertConversationMember(principal: AuthPrincipal, conversationId: string) {
+    if (conversationId.startsWith('standalone:')) return
+    await this.djangoConversationClient.assertMember(principal, conversationId)
+  }
 
   private async resolveUser(req: FastifyRequest) {
     const authHeader = req.headers.authorization || ''
@@ -33,7 +46,7 @@ export class CallsController {
     return principal
   }
 
-  /** GET /calls/history — list call history for the authenticated user. */
+  /** GET /calls/history - list call history for the authenticated user. */
   @Get('history')
   async history(
     @Req() req: FastifyRequest,
@@ -50,9 +63,9 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/missed-count — return the number of missed calls since a given
+   * GET /calls/missed-count - return the number of missed calls since a given
    * timestamp.  Used by notification badges.
-   * Query param: since (ISO string, optional — defaults to 24 h ago).
+   * Query param: since (ISO string, optional - defaults to 24 h ago).
    */
   @Get('missed-count')
   async missedCount(
@@ -66,7 +79,7 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/active?conversationId=X — return the current active call in a
+   * GET /calls/active?conversationId=X - return the current active call in a
    * conversation (if any). Used by the chat room to show the "Join call" banner
    * when the user opens the room after a call has already started.
    */
@@ -75,8 +88,9 @@ export class CallsController {
     @Req() req: FastifyRequest,
     @Query('conversationId') conversationId?: string,
   ) {
-    await this.resolveUser(req)
+    const principal = await this.resolveUser(req)
     if (!conversationId) throw new BadRequestException('conversationId required')
+    await this.assertConversationMember(principal, conversationId)
     const call = await this.callsService.getActiveCall(conversationId)
     if (!call) return { call: null }
     return {
@@ -96,7 +110,7 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/conversation?conversationId=X&limit=N — return call history for
+   * GET /calls/conversation?conversationId=X&limit=N - return call history for
    * a specific conversation, used to render past-call rows in the chat room.
    */
   @Get('conversation')
@@ -107,6 +121,7 @@ export class CallsController {
   ) {
     const principal = await this.resolveUser(req)
     if (!conversationId) throw new BadRequestException('conversationId required')
+    await this.assertConversationMember(principal, conversationId)
     const parsedLimit = limit ? Math.min(Number(limit) || 30, 100) : 30
     const calls = await this.callsService.getCallsForConversation(conversationId, parsedLimit)
     return {
@@ -138,7 +153,7 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/ice-servers — return TURN/STUN credentials for WebRTC.
+   * GET /calls/ice-servers - return TURN/STUN credentials for WebRTC.
    * Credentials are derived from server-side environment variables so they
    * are never baked into the client bundle.
    */
@@ -149,7 +164,7 @@ export class CallsController {
   }
 
   /**
-   * POST /calls/standalone — create a call that is NOT tied to an existing
+   * POST /calls/standalone - create a call that is NOT tied to an existing
    * conversation.  Returns callId, conversationId, and an inviteToken that
    * recipients can use to join via a deep link.
    */
@@ -166,6 +181,7 @@ export class CallsController {
     },
   ) {
     const principal = await this.resolveUser(req)
+    await this.rateLimit.assert(principal.userId, 'call:standalone-create', 20)
     if (!body.call_id) throw new NotFoundException('call_id required')
 
     const scheduledFor = body.scheduled_for ? new Date(body.scheduled_for) : null
@@ -191,7 +207,7 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/join/:token — resolve an invite token to call info so the
+   * GET /calls/join/:token - resolve an invite token to call info so the
    * client can join without knowing the conversationId up front.
    */
   @Get('join/:token')
@@ -212,7 +228,7 @@ export class CallsController {
   }
 
   /**
-   * GET /calls/scheduled — list upcoming scheduled calls for the authenticated user.
+   * GET /calls/scheduled - list upcoming scheduled calls for the authenticated user.
    */
   @Get('scheduled')
   async scheduled(@Req() req: FastifyRequest) {
@@ -233,7 +249,7 @@ export class CallsController {
   }
 
   /**
-   * POST /calls/invite-link — generate (or return) an invite token for any
+   * POST /calls/invite-link - generate (or return) an invite token for any
    * active call so participants can share a join link mid-call.
    */
   @Post('invite-link')
@@ -241,12 +257,14 @@ export class CallsController {
     @Req() req: FastifyRequest,
     @Body() body: { conversation_id?: string; call_id?: string },
   ) {
-    await this.resolveUser(req)
+    const principal = await this.resolveUser(req)
+    await this.rateLimit.assert(principal.userId, 'call:invite-link', 20)
     const conversationId = body.conversation_id
     const callId = body.call_id
     if (!conversationId || !callId) {
       throw new BadRequestException('conversation_id and call_id required')
     }
+    await this.assertConversationMember(principal, conversationId)
     const token = await this.callsService.getOrCreateInviteToken(conversationId, callId)
     if (!token) throw new NotFoundException('Call not found or already ended')
     return {
@@ -257,7 +275,7 @@ export class CallsController {
   }
 
   /**
-   * POST /calls/history — fire-and-forget endpoint called by the client when a
+   * POST /calls/history - fire-and-forget endpoint called by the client when a
    * call ends.  Records supplementary metadata (duration, etc.) against the
    * existing call session document.  Returns 204 on success.
    */
@@ -274,7 +292,7 @@ export class CallsController {
       ended_at?: string
     },
   ) {
-    // Validate auth — throw 401 if missing/invalid; otherwise silently accept.
+    // Validate auth - throw 401 if missing/invalid; otherwise silently accept.
     await this.resolveUser(req)
     // Best-effort: if we can locate the call document, stamp it with the
     // client-reported duration / ended_at.  Non-fatal if not found.
@@ -287,7 +305,7 @@ export class CallsController {
           ...(body.ended_at ? { endedAt: new Date(body.ended_at) } : {}),
         })
       } catch {
-        // Non-fatal — the call may have already been ended by the server-side
+        // Non-fatal - the call may have already been ended by the server-side
         // socket handler, or the call_id may refer to a gateway-side UUID.
       }
     }

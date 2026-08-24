@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
 import { DjangoAuthService } from '../auth/django-auth.service';
 import { DeviceTokensService } from './device-tokens.service';
+import { RateLimitService } from '../chat/infra/rate-limit/rate-limit.service';
 
 type RegisterTokenBody = {
   token?: string;
@@ -20,6 +21,7 @@ export class NotificationsController {
   constructor(
     private readonly auth: DjangoAuthService,
     private readonly tokens: DeviceTokensService,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
   private async authenticate(authorization: string | undefined, deviceId?: string): Promise<string> {
@@ -40,6 +42,7 @@ export class NotificationsController {
     @Headers('x-device-id') deviceIdHeader?: string,
   ) {
     const userId = await this.authenticate(authorization, deviceIdHeader);
+    await this.rateLimit.assert(userId, 'notif:register', 20);
 
     const pushToken = body?.token ? String(body.token) : '';
     const platform = body?.platform ?? 'android';
@@ -57,7 +60,7 @@ export class NotificationsController {
     return { ok: true };
   }
 
-  // Logout / account-deletion cleanup. Deactivates (not deletes — keeps the
+  // Logout / account-deletion cleanup. Deactivates (not deletes - keeps the
   // row for audit/debugging, matching Django's soft-delete convention for
   // the same concept) either one exact token, or every token registered
   // for a deviceId if the caller only has that left (e.g. local storage
@@ -69,6 +72,7 @@ export class NotificationsController {
     @Headers('x-device-id') deviceIdHeader?: string,
   ) {
     const userId = await this.authenticate(authorization, deviceIdHeader);
+    await this.rateLimit.assert(userId, 'notif:unregister', 20);
 
     const pushToken = body?.token ? String(body.token) : '';
     const deviceId = body?.deviceId ? String(body.deviceId) : '';

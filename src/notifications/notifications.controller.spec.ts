@@ -4,13 +4,14 @@ import { NotificationsController } from './notifications.controller'
 function buildDeps() {
   const auth = { introspect: jest.fn() }
   const tokens = { upsert: jest.fn(), deactivate: jest.fn(), deactivateForDevice: jest.fn() }
-  return { auth, tokens }
+  const rateLimit = { assert: jest.fn().mockResolvedValue(undefined) }
+  return { auth, tokens, rateLimit }
 }
 
 describe('NotificationsController.registerToken', () => {
   it('rejects a request with no bearer token', async () => {
-    const { auth, tokens } = buildDeps()
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const { auth, tokens, rateLimit } = buildDeps()
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await expect(
       controller.registerToken(undefined, { token: 't1' }),
@@ -19,9 +20,9 @@ describe('NotificationsController.registerToken', () => {
   })
 
   it('rejects a bearer token Django cannot introspect', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue(null)
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await expect(
       controller.registerToken('Bearer bad-token', { token: 't1' }),
@@ -29,9 +30,9 @@ describe('NotificationsController.registerToken', () => {
   })
 
   it('upserts the token for the introspected user', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     const result = await controller.registerToken('Bearer good-token', {
       token: 'push-token', platform: 'ios', deviceId: 'device-1',
@@ -44,9 +45,9 @@ describe('NotificationsController.registerToken', () => {
   })
 
   it('returns a typed response instead of upserting when the token is missing', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     const result = await controller.registerToken('Bearer good-token', {});
     expect(result).toEqual({ ok: false, reason: 'token_required' })
@@ -56,8 +57,8 @@ describe('NotificationsController.registerToken', () => {
 
 describe('NotificationsController.unregisterToken', () => {
   it('requires authentication, same as register', async () => {
-    const { auth, tokens } = buildDeps()
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const { auth, tokens, rateLimit } = buildDeps()
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await expect(
       controller.unregisterToken(undefined, { token: 't1' }),
@@ -65,9 +66,9 @@ describe('NotificationsController.unregisterToken', () => {
   })
 
   it('requires at least a token or a deviceId', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await expect(controller.unregisterToken('Bearer t', {})).rejects.toBeInstanceOf(BadRequestException)
     expect(tokens.deactivate).not.toHaveBeenCalled()
@@ -75,9 +76,9 @@ describe('NotificationsController.unregisterToken', () => {
   })
 
   it('deactivates by exact token when given one', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await controller.unregisterToken('Bearer t', { token: 'push-token' })
     expect(tokens.deactivate).toHaveBeenCalledWith({ userId: 'user-1', token: 'push-token' })
@@ -85,9 +86,9 @@ describe('NotificationsController.unregisterToken', () => {
   })
 
   it('deactivates by deviceId when no exact token is known (e.g. storage already cleared)', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await controller.unregisterToken('Bearer t', { deviceId: 'device-1' })
     expect(tokens.deactivateForDevice).toHaveBeenCalledWith({ userId: 'user-1', deviceId: 'device-1' })
@@ -95,9 +96,9 @@ describe('NotificationsController.unregisterToken', () => {
   })
 
   it('runs both when both are provided', async () => {
-    const { auth, tokens } = buildDeps()
+    const { auth, tokens, rateLimit } = buildDeps()
     auth.introspect.mockResolvedValue({ userId: 'user-1' })
-    const controller = new NotificationsController(auth as any, tokens as any)
+    const controller = new NotificationsController(auth as any, tokens as any, rateLimit as any)
 
     await controller.unregisterToken('Bearer t', { token: 'push-token', deviceId: 'device-1' })
     expect(tokens.deactivate).toHaveBeenCalledWith({ userId: 'user-1', token: 'push-token' })
