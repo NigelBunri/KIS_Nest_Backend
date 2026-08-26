@@ -401,7 +401,11 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
             const isActivelyViewing = recipientSockets.some(
               (s: any) => String(s.principal?.userId) === String(userId),
             )
-            if (isActivelyViewing) continue
+            if (isActivelyViewing) {
+              logger.log(`[messages] push skipped: recipient=${userId} is actively viewing conversation=${conversationId}`)
+              continue
+            }
+            logger.log(`[messages] sending push: recipient=${userId} conversation=${conversationId} messageId=${created.id}`)
             await deps.notificationsService.notifyNewMessage({
               toUserId: String(userId),
               conversationId,
@@ -409,7 +413,8 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
               preview,
               senderName: principal.username ?? undefined,
               senderId: principal.userId,
-            }).catch((e: any) => logger.warn('[messages] notifyNewMessage failed', e?.message))
+            }).then((res: any) => logger.log(`[messages] push result recipient=${userId}: ${JSON.stringify(res)}`))
+              .catch((e: any) => logger.warn('[messages] notifyNewMessage failed', e?.message))
           }
         }
       }

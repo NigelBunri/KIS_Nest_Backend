@@ -32,7 +32,7 @@ export class NotificationsService implements OnModuleInit {
     const fcm = createFcmProvider();
     if (!fcm) {
       this.logger.warn(
-        'FCM provider not initialised — push notifications will be silently dropped. ' +
+        'FCM provider not initialised - push notifications will be silently dropped. ' +
         'Set FCM_SERVICE_ACCOUNT_JSON or FCM_SERVICE_ACCOUNT_PATH to enable real delivery.',
       );
     }
@@ -41,7 +41,7 @@ export class NotificationsService implements OnModuleInit {
     this.apnsVoip = createApnsVoipProvider();
     if (!this.apnsVoip) {
       this.logger.warn(
-        'APNs VoIP provider not initialised — incoming-call pushes will fall back to FCM only ' +
+        'APNs VoIP provider not initialised - incoming-call pushes will fall back to FCM only ' +
         '(no CallKit wake from killed state on iOS). Set APNS_KEY_PATH/APNS_KEY_BASE64, ' +
         'APNS_KEY_ID, APNS_TEAM_ID and APNS_BUNDLE_ID to enable it.',
       );
@@ -50,11 +50,11 @@ export class NotificationsService implements OnModuleInit {
 
   onModuleInit() {
     if (this.provider instanceof DummyPushProvider) {
-      this.logger.warn('Running with DummyPushProvider — no push notifications will be delivered.');
+      this.logger.warn('Running with DummyPushProvider - no push notifications will be delivered.');
     }
   }
 
-  /** Non-secret provider status for the /health endpoint — never expose
+  /** Non-secret provider status for the /health endpoint - never expose
    * credential values, only whether each provider initialized. */
   getProviderStatus() {
     return {
@@ -69,9 +69,15 @@ export class NotificationsService implements OnModuleInit {
       ? target.deviceTokens
       : await this.tokens.listActiveTokens(target.userId);
 
-    if (!tokenList.length) return { ok: true, delivered: 0, userId: target.userId };
+    if (!tokenList.length) {
+      this.logger.log(`[notify] no active device tokens for userId=${target.userId} — nothing to send`);
+      return { ok: true, delivered: 0, userId: target.userId };
+    }
 
     const res = await this.provider.send(tokenList, msg);
+    this.logger.log(
+      `[notify] sent to userId=${target.userId}: tokens=${tokenList.length} delivered=${res.delivered} failedTokens=${res.failedTokens?.length ?? 0}`,
+    );
 
     // Prune permanently-invalid tokens returned by the provider
     if (res.failedTokens?.length) {
@@ -126,7 +132,7 @@ export class NotificationsService implements OnModuleInit {
       }
     }
 
-    // Also always send a regular FCM push — covers Android, and any iOS
+    // Also always send a regular FCM push - covers Android, and any iOS
     // device that hasn't registered a VoIP token yet.
     return this.notify(
       { userId: input.toUserId },
@@ -184,10 +190,12 @@ export class NotificationsService implements OnModuleInit {
     const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
     if (prefs) {
       if (prefs.notif_messages === false) {
+        this.logger.log(`[notify] skipped userId=${input.toUserId}: muted_category`);
         return { ok: true, delivered: 0, skipped: 'muted_category' };
       }
       const dnd = prefs.dnd_quiet_hours;
       if (dnd?.enabled && isInQuietHours(dnd)) {
+        this.logger.log(`[notify] skipped userId=${input.toUserId}: dnd`);
         return { ok: true, delivered: 0, skipped: 'dnd' };
       }
     }
