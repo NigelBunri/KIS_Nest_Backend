@@ -181,7 +181,7 @@ export interface MessagesDeps {
       createdAt: Date
       dto: any
       // True when this clientId was already persisted by an earlier call
-      // (a retried/duplicate send) — callers must skip post-send side
+      // (a retried/duplicate send) - callers must skip post-send side
       // effects (push notifications, webhook dispatch, etc.) in that case.
       reused?: boolean
     }>
@@ -326,7 +326,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         createdAt: created.createdAt.toISOString(),
       }
 
-      // Intercept scheduled messages — persist but do not broadcast yet
+      // Intercept scheduled messages - persist but do not broadcast yet
       if (payload.scheduledAt) {
         const scheduledDate = new Date(payload.scheduledAt)
         const tenSecondsFromNow = new Date(Date.now() + 10_000)
@@ -388,8 +388,20 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
             })
             if (!deps.notificationsService) continue
             if (String(userId) === String(principal.userId)) continue
-            const isOnline = await deps.presenceService?.isOnline?.(String(userId))
-            if (isOnline) continue
+            // Presence.isOnline only reflects "has any live socket to the
+            // server" — true even while backgrounded, since iOS/Android keep
+            // a socket connection alive for a while after the app leaves the
+            // foreground. That made push silently never fire for the common
+            // "app backgrounded" case. Room membership is the correct signal:
+            // the client explicitly joins this conversation's room only while
+            // actively viewing it (chat.join) and leaves it when navigating
+            // away or backgrounding (chat.leave), so this reflects whether
+            // the recipient is genuinely looking at this chat right now.
+            const recipientSockets = await server.in(rooms.convRoom(conversationId)).fetchSockets()
+            const isActivelyViewing = recipientSockets.some(
+              (s: any) => String(s.principal?.userId) === String(userId),
+            )
+            if (isActivelyViewing) continue
             await deps.notificationsService.notifyNewMessage({
               toUserId: String(userId),
               conversationId,
@@ -405,7 +417,7 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       if (created.reused) {
         // This clientId was already persisted by an earlier call (e.g. the
         // client resent EVT.SEND after a socket reconnect because it never
-        // received the first ack) — updateLastMessage/dispatchWebhook/
+        // received the first ack) - updateLastMessage/dispatchWebhook/
         // notifyNewMessage already ran once for this message. Re-running them
         // would dispatch a duplicate outbound webhook and a duplicate push.
         logger.log(`[messages] skipping post-send side effects for reused clientId=${clientId} serverId=${created.id}`)
