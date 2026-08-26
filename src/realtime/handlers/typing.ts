@@ -11,6 +11,9 @@ export interface TypingDeps {
   moderationService?: {
     assertAllowed(args: { conversationId: string; userId: string; action: 'typing' }): Promise<void> | void
   }
+  djangoConversationClient?: {
+    listMemberIds?: (conversationId: string) => Promise<string[]>
+  }
 }
 
 export function registerTypingHandlers(server: Server, socket: Socket, deps: TypingDeps) {
@@ -43,14 +46,29 @@ export function registerTypingHandlers(server: Server, socket: Socket, deps: Typ
           })
         }
 
-        safeEmit(server, rooms.convRoom(conversationId), EVT.TYPING, {
+        const typingPayload = {
           conversationId,
           userId: principal.userId,
           senderName: principal.username ?? undefined,
           isTyping: !!payload?.isTyping,
           threadId: payload?.threadId ?? null,
           at: new Date().toISOString(),
-        })
+        }
+
+        safeEmit(server, rooms.convRoom(conversationId), EVT.TYPING, typingPayload)
+
+        // Also broadcast to each member's userRoom, not just the conv room.
+        // The conv room only has members who are ACTIVELY VIEWING this exact
+        // conversation right now (see chat.join/chat.leave) — someone sitting
+        // on the chat LIST screen never joins it, so without this they'd
+        // never see a "typing…" indicator on that list item at all.
+        if (deps.djangoConversationClient?.listMemberIds) {
+          const memberIds = await deps.djangoConversationClient.listMemberIds(conversationId).catch(() => [] as string[])
+          for (const memberId of memberIds) {
+            if (String(memberId) === String(principal.userId)) continue
+            safeEmit(server, rooms.userRoom(String(memberId)), EVT.TYPING, typingPayload)
+          }
+        }
 
         safeAck(ack, ok({ typing: true }))
       } catch (e: any) {
