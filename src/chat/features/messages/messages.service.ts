@@ -65,6 +65,7 @@ export class MessagesService {
       styledText: input.styledText,
       voice: input.voice,
       sticker: input.sticker,
+      viewOnce: (input as any).viewOnce,
 
       attachments: input.attachments,
       media: (input as any).media,
@@ -310,6 +311,72 @@ export class MessagesService {
     ;(msg as any).deleteState = input.mode
     ;(msg as any).deletedAt = nowMs
     ;(msg as any).deletedBy = input.requesterId
+
+    await (msg as any).save()
+    return msg
+  }
+
+  /**
+   * Consumes a view-once message: strips its content and records that it's
+   * been opened, without deleting it (isDeleted is a real delete-for-
+   * everyone, rendered client-side as "Message deleted" - a view-once
+   * message must keep rendering "Opened", so this deliberately never
+   * touches that flag).
+   *
+   * This used to be implemented by calling deleteMessage(), which:
+   *   1) required requesterId === msg.senderId ("only sender can delete for
+   *      everyone") - but the person opening a view-once message they
+   *      received is the RECIPIENT, not the sender, so this threw
+   *      ForbiddenException on essentially every real use of the feature.
+   *      The chat.view_once socket handler never surfaced that failure to
+   *      the caller (fire-and-forget emit, no ack check), so it failed
+   *      completely silently: the opener's own device showed "Opened"
+   *      from its own optimistic local strip, while the server-persisted
+   *      content was never actually touched.
+   *   2) set isDeleted = true on success, which - even disregarding (1) -
+   *      broadcasts as EVT.DELETE, which every other participant's client
+   *      renders as "Message deleted", not "Opened".
+   *
+   * Authorization here is deliberately just conversation membership
+   * (enforced by the caller via assertMember before this is called), not
+   * sender-only - any member consuming a view-once message they can see is
+   * the entire point of the feature.
+   */
+  async markViewOnceOpened(args: {
+    viewerId: string
+    conversationId: string
+    messageId: string
+    nowMs?: number
+  }): Promise<MessageDocument> {
+    const msg = await this.messageModel.findOne({
+      _id: args.messageId,
+      conversationId: args.conversationId,
+    })
+    if (!msg) throw new NotFoundException('message not found')
+
+    // Idempotent: a double-tap, a retry after a dropped ack, or two of the
+    // viewer's own devices racing to open the same message must not strip
+    // an already-stripped message again or re-broadcast a second time.
+    if ((msg as any).viewedAt) return msg
+
+    ;(msg as any).viewOnce = true
+    ;(msg as any).viewedAt = new Date(args.nowMs ?? Date.now()).toISOString()
+
+    // Mirrors exactly what the client already strips locally the instant
+    // it opens the viewer modal (see KIS RN ChatRoomPage.tsx's
+    // handleViewOnce) - every content-bearing field, nothing else.
+    ;(msg as any).text = undefined
+    ;(msg as any).styledText = undefined
+    ;(msg as any).voice = undefined
+    ;(msg as any).sticker = undefined
+    ;(msg as any).attachments = undefined
+    ;(msg as any).media = undefined
+    ;(msg as any).contacts = undefined
+    ;(msg as any).poll = undefined
+    ;(msg as any).event = undefined
+    ;(msg as any).linkPreview = undefined
+    ;(msg as any).ciphertext = undefined
+    ;(msg as any).encryptionMeta = undefined
 
     await (msg as any).save()
     return msg

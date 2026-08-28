@@ -199,6 +199,12 @@ export interface MessagesDeps {
       messageId: string
     }): Promise<any>
 
+    markViewOnceOpened(args: {
+      viewerId: string
+      conversationId: string
+      messageId: string
+    }): Promise<any>
+
     listRecent(args: {
       conversationId: string
       limit?: number
@@ -647,15 +653,21 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
     try {
       await deps.djangoConversationClient.assertMember(principal, conversationId)
 
-      // Soft-delete the message for everyone: view-once content must not persist
-      const deleted = await deps.messagesService.deleteMessage({
-        senderId: principal.userId,
+      // Strips the content and records it as opened - NOT a delete-for-
+      // everyone (that's EVT.DELETE/deleteMessage, a different action with
+      // a different permission model and a different client-rendered
+      // terminal state - see markViewOnceOpened's docstring for why this
+      // used to call that by mistake).
+      const opened = await deps.messagesService.markViewOnceOpened({
+        viewerId: principal.userId,
         conversationId,
         messageId,
       })
 
-      // Broadcast the deletion so all recipients clear it immediately
-      safeEmit(server, rooms.convRoom(conversationId), EVT.DELETE, deleted ?? { conversationId, messageId })
+      // Broadcast to the whole room (including the opener's own other
+      // devices) so every participant's client applies the same "Opened"
+      // state instead of only the opener's own optimistic local strip.
+      safeEmit(server, rooms.convRoom(conversationId), EVT.VIEW_ONCE, opened ?? { conversationId, messageId })
 
       safeAck(ack, ok({ viewed: true }))
     } catch (e: any) {

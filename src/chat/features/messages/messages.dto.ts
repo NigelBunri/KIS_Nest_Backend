@@ -222,6 +222,15 @@ export class SendMessageDto {
   @Type(() => VoiceDto)
   voice?: VoiceDto;
 
+  // Only meaningful for unencrypted sends (public rooms, or E2EE off) - an
+  // E2EE send's real viewOnce flag lives inside the encrypted payload and
+  // never reaches the server at creation time; that's fine, since it isn't
+  // needed until the recipient actually opens it (see chat.view_once /
+  // markViewOnceOpened, which sets it server-side at that point instead).
+  @IsOptional()
+  @IsBoolean()
+  viewOnce?: boolean;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => StickerDto)

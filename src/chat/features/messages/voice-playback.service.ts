@@ -53,7 +53,19 @@ export class VoicePlaybackService {
       .lean()
       .exec();
 
-    if (!message || (message as any).isDeleted || (message as any).kind !== 'voice' || !(message as any).voice) {
+    // Deliberately NOT gated on message.kind === 'voice'. An E2EE-sent
+    // voice note's server-visible kind is always 'text' by design (see KIS
+    // RN useChatMessaging.ts - "the real kind lives inside the encrypted
+    // payload, keep the server-visible shell generic"), with only a
+    // plaintext voice{mediaAssetId, objectKey, durationMs} echo surviving
+    // outside the envelope specifically so this endpoint can still resolve
+    // it. Requiring kind === 'voice' on top of that made every E2EE voice
+    // note's playback URL permanently unrefreshable the moment its signed
+    // URL TTL expired (CHAT_VOICE_PLAYBACK_TTL_SECONDS, 15 min) - i.e.
+    // nearly every voice note in nearly every conversation, since E2EE is
+    // on by default. The presence of message.voice is itself the
+    // authoritative signal; kind isn't a trustworthy one here.
+    if (!message || (message as any).isDeleted || !(message as any).voice) {
       throw new NotFoundException('Voice message not found.');
     }
 

@@ -293,6 +293,21 @@ export class Message {
   @Prop({ default: false })
   isDeleted!: boolean;
 
+  /** Message-level view-once (text, voice, or attachments together - the
+   * whole message is either view-once or it isn't, no per-part
+   * granularity). Set true by the sender's original payload only when
+   * unencrypted; for E2EE sends this stays false at creation and is set
+   * here only by markViewOnceOpened, purely as a "this was view-once and
+   * has now been consumed" record - see that method's docstring. */
+  @Prop({ default: false })
+  viewOnce?: boolean;
+
+  /** ISO timestamp set once a recipient opens a view-once message. Presence
+   * (not just viewOnce) is what markViewOnceOpened / the chat.view_once
+   * handler treat as "already consumed" for idempotency. */
+  @Prop()
+  viewedAt?: string;
+
   // Optional: denormalized preview string for conversation lists
   @Prop()
   previewText?: string;
