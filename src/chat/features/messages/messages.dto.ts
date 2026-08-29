@@ -65,15 +65,16 @@ export class VoiceDto {
   // apps: KIS RN uploadFileToBackend.ts / ChatRoomHandlers.tsx.
   @IsOptional() @IsString() id?: string;
   @IsOptional() @IsString() url?: string;
-  // Django's MediaAsset.id (UUID) — the PERMANENT identity used to refresh
-  // an expired playback url via GET /chat/messages/:messageId/voice/playback-url
-  // (see voice-playback.service.ts). This is what Django's internal
-  // chat-voice-sign endpoint looks the asset up by; `objectKey` below is
-  // kept for backward compat / display only — Django's UploadFileView never
-  // actually returns the real S3 key to a client, so this field is
-  // populated with the same asset id today (see buildVoiceAttachment.ts on
-  // the RN side) rather than a real storage key. Never trust either field
-  // as a substitute for the server re-deriving the object from the
+  // Nest's own UploadIntent.attachmentId (UUID) — the PERMANENT identity
+  // used to refresh an expired playback url via
+  // GET /chat/messages/:messageId/voice/playback-url (see
+  // voice-playback.service.ts, which looks up the UploadIntent by this id
+  // and presigns a fresh GET directly, no Django involved). Older rows sent
+  // before voice notes moved to Nest's direct-to-S3 flow may still carry a
+  // Django MediaAsset.id here instead — voice-playback.service.ts falls
+  // back to Django's chat-voice-sign endpoint for exactly those. `objectKey`
+  // below is kept for backward compat / display only. Never trust either
+  // field as a substitute for the server re-deriving the object from the
   // persisted message — see voice-playback.service.ts.
   @IsOptional() @IsString() mediaAssetId?: string;
   @IsOptional() @IsString() objectKey?: string;

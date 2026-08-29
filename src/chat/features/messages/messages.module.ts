@@ -13,6 +13,7 @@ import { DjangoConversationClient } from '../../integrations/django/django-conve
 import { DjangoMediaClient } from '../../integrations/django/django-media.client';
 import { RateLimitService } from '../../infra/rate-limit/rate-limit.service';
 import { ObservabilityModule } from '../../../observability/observability.module';
+import { StorageModule } from '../../../storage/storage.module';
 
 
 @Module({
@@ -20,6 +21,7 @@ import { ObservabilityModule } from '../../../observability/observability.module
     AuthModule,
     HttpModule,
     ObservabilityModule,
+    StorageModule,
     MongooseModule.forFeature([
       { name: Message.name, schema: MessageSchema },
       { name: UploadIntent.name, schema: UploadIntentSchema },

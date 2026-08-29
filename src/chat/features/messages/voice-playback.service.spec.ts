@@ -10,6 +10,24 @@ function buildModel(message: any) {
   return { findOne }
 }
 
+// Default: no matching UploadIntent — every existing test's fixtures predate
+// Nest's direct-to-S3 voice flow, so resolveViaNestStorage() must fall
+// through to the legacy Django path unchanged. Pass an intent to opt a test
+// into the new path instead.
+function buildUploadIntentModel(intent: any = null) {
+  const exec = jest.fn().mockResolvedValue(intent)
+  const lean = jest.fn(() => ({ exec }))
+  const findOne = jest.fn(() => ({ lean }))
+  return { findOne }
+}
+
+function buildStorage(overrides: Partial<{ driver: () => 's3' | 'local'; generatePresignedGet: jest.Mock }> = {}) {
+  return {
+    driver: overrides.driver ?? jest.fn(() => 's3'),
+    generatePresignedGet: overrides.generatePresignedGet ?? jest.fn().mockResolvedValue('https://s3/nest-signed'),
+  }
+}
+
 describe('VoicePlaybackService.resolvePlaybackUrl', () => {
   const principal = { userId: 'user-1', token: 'tok' }
 
@@ -25,7 +43,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
     const media = { signChatVoiceAsset: jest.fn().mockResolvedValue({ url: 'https://s3/x', expiresAt: '2026-01-01T00:00:00Z', expiresInSeconds: 900 }) }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
     const result = await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)
 
     expect(result.url).toBe('https://s3/x')
@@ -44,7 +68,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
     const media = { signChatVoiceAsset: jest.fn().mockResolvedValue({ url: 'https://s3/x', expiresAt: 'x', expiresInSeconds: 900 }) }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
     // resolvePlaybackUrl's signature only accepts (messageId, principal) —
     // there is structurally no parameter for a client to pass an object
     // key/asset id through. This asserts what actually reaches Django came
@@ -69,7 +99,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn().mockRejectedValue(new Error('not a member')) }
     const media = { signChatVoiceAsset: jest.fn() }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)).rejects.toBeInstanceOf(ForbiddenException)
     expect(media.signChatVoiceAsset).not.toHaveBeenCalled()
@@ -88,7 +124,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
       const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
       const media = { signChatVoiceAsset: jest.fn().mockResolvedValue({ url: 'x', expiresAt: 'x', expiresInSeconds: 900 }) }
 
-      const service = new VoicePlaybackService(model as any, conv as any, media as any)
+      const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
       await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)
 
       expect(conv.assertMember).toHaveBeenCalledWith(principal, conversationId)
@@ -101,7 +143,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn() }
     const media = { signChatVoiceAsset: jest.fn() }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)).rejects.toBeInstanceOf(NotFoundException)
     expect(conv.assertMember).not.toHaveBeenCalled()
@@ -112,7 +160,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn() }
     const media = { signChatVoiceAsset: jest.fn() }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)).rejects.toBeInstanceOf(NotFoundException)
   })
@@ -122,7 +176,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn() }
     const media = { signChatVoiceAsset: jest.fn() }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl('not-an-object-id', principal)).rejects.toBeInstanceOf(NotFoundException)
   })
@@ -139,7 +199,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
     const media = { signChatVoiceAsset: jest.fn() }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)).rejects.toBeInstanceOf(NotFoundException)
     expect(media.signChatVoiceAsset).not.toHaveBeenCalled()
@@ -158,9 +224,82 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
     const upstreamError = new Error('Could not reach the media signing service. Please try again.')
     const media = { signChatVoiceAsset: jest.fn().mockRejectedValue(upstreamError) }
 
-    const service = new VoicePlaybackService(model as any, conv as any, media as any)
+    const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
 
     await expect(service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)).rejects.toBe(upstreamError)
+  })
+
+  it('resolves via Nest storage directly (no Django call) when mediaAssetId matches a confirmed UploadIntent', async () => {
+    const message = {
+      _id: VALID_OBJECT_ID,
+      conversationId: 'conv-1',
+      kind: 'voice',
+      isDeleted: false,
+      voice: { mediaAssetId: 'nest-attachment-1' },
+    }
+    const model = buildModel(message)
+    const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
+    const media = { signChatVoiceAsset: jest.fn() }
+    const uploadIntentModel = buildUploadIntentModel({
+      attachmentId: 'nest-attachment-1',
+      objectKey: '2026-08-29/uuid-voice.m4a',
+      originalFilename: 'voice.m4a',
+      status: 'confirmed',
+    })
+    const generatePresignedGet = jest.fn().mockResolvedValue('https://s3/nest-signed?sig=abc')
+    const storage = buildStorage({ generatePresignedGet })
+
+    const service = new VoicePlaybackService(
+      model as any,
+      uploadIntentModel as any,
+      storage as any,
+      conv as any,
+      media as any,
+    )
+    const result = await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)
+
+    expect(result.url).toBe('https://s3/nest-signed?sig=abc')
+    expect(generatePresignedGet).toHaveBeenCalledWith('2026-08-29/uuid-voice.m4a', expect.any(Number), 'voice.m4a')
+    expect(media.signChatVoiceAsset).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Django when the storage driver is not S3, even if a matching UploadIntent exists', async () => {
+    const message = {
+      _id: VALID_OBJECT_ID,
+      conversationId: 'conv-1',
+      kind: 'voice',
+      isDeleted: false,
+      voice: { mediaAssetId: 'nest-attachment-1' },
+    }
+    const model = buildModel(message)
+    const conv = { assertMember: jest.fn().mockResolvedValue({ isMember: true }) }
+    const media = {
+      signChatVoiceAsset: jest.fn().mockResolvedValue({ url: 'https://local/x', expiresAt: 'x', expiresInSeconds: 900 }),
+    }
+    const uploadIntentModel = buildUploadIntentModel({
+      attachmentId: 'nest-attachment-1',
+      objectKey: 'local-key',
+      status: 'confirmed',
+    })
+    const storage = buildStorage({ driver: jest.fn(() => 'local') })
+
+    const service = new VoicePlaybackService(
+      model as any,
+      uploadIntentModel as any,
+      storage as any,
+      conv as any,
+      media as any,
+    )
+    const result = await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)
+
+    expect(result.url).toBe('https://local/x')
+    expect(media.signChatVoiceAsset).toHaveBeenCalled()
   })
 
   it('never logs anything (no signed URL / internal token leakage risk) on either a successful or failed resolution', async () => {
@@ -185,7 +324,13 @@ describe('VoicePlaybackService.resolvePlaybackUrl', () => {
           .mockRejectedValueOnce(new Error('boom')),
       }
 
-      const service = new VoicePlaybackService(model as any, conv as any, media as any)
+      const service = new VoicePlaybackService(
+      model as any,
+      buildUploadIntentModel() as any,
+      buildStorage() as any,
+      conv as any,
+      media as any,
+    )
       await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal)
       await service.resolvePlaybackUrl(VALID_OBJECT_ID, principal).catch(() => {})
 
