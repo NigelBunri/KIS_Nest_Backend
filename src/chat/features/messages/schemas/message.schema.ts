@@ -152,6 +152,23 @@ class LocationCoords {
 const LocationCoordsSchema = SchemaFactory.createForClass(LocationCoords);
 
 @Schema({ _id: false })
+class BibleVerse {
+  // Canonical "Book chapter:verseStart[-verseEnd]" string - what the
+  // receiving client's Bible screen actually navigates to (see
+  // src/utils/bibleReference.ts on the frontend).
+  @Prop({ required: true }) reference!: string;
+  @Prop() bookCode?: string;
+  @Prop() bookName?: string;
+  @Prop({ required: true }) chapter!: number;
+  @Prop() verseStart?: number;
+  @Prop() verseEnd?: number;
+  // Verse text snapshot for the chat preview card - the receiver can read
+  // it inline without opening the Bible screen.
+  @Prop() text?: string;
+}
+const BibleVerseSchema = SchemaFactory.createForClass(BibleVerse);
+
+@Schema({ _id: false })
 class LinkPreview {
   @Prop() url?: string;
   @Prop() title?: string;
@@ -207,7 +224,8 @@ export type MessageKind =
   | 'poll'
   | 'event'
   | 'location'
-  | 'call_event';
+  | 'call_event'
+  | 'bible_verse';
 
 @Schema({
   timestamps: true,
@@ -230,7 +248,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse'],
   })
   kind!: MessageKind;
 
@@ -280,6 +298,9 @@ export class Message {
 
   @Prop({ type: LocationCoordsSchema })
   location?: LocationCoords;
+
+  @Prop({ type: BibleVerseSchema })
+  bibleVerse?: BibleVerse;
 
   @Prop({ type: LinkPreviewSchema })
   linkPreview?: LinkPreview;

@@ -162,6 +162,20 @@ export class LocationDto {
   title?: string;
 }
 
+export class BibleVerseDto {
+  @IsString() reference!: string;
+
+  @IsOptional() @IsString() bookCode?: string;
+  @IsOptional() @IsString() bookName?: string;
+
+  @IsInt() @Min(1) chapter!: number;
+
+  @IsOptional() @IsInt() @Min(1) verseStart?: number;
+  @IsOptional() @IsInt() @Min(1) verseEnd?: number;
+
+  @IsOptional() @IsString() text?: string;
+}
+
 export class LinkPreviewDto {
   @IsOptional() @IsString() url?: string;
   @IsOptional() @IsString() title?: string;
@@ -268,6 +282,11 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => LocationDto)
   location?: LocationDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BibleVerseDto)
+  bibleVerse?: BibleVerseDto;
 
   @IsOptional()
   @ValidateNested()

@@ -73,6 +73,7 @@ export class MessagesService {
       poll: input.poll,
       event: input.event,
       location: (input as any).location,
+      bibleVerse: (input as any).bibleVerse,
       linkPreview: (input as any).linkPreview,
 
       replyToId: input.replyToId,
@@ -517,6 +518,7 @@ export class MessagesService {
       'location',
       'system',
       'call_event',
+      'bible_verse',
     ])
     if (!allowedKinds.has(kind)) throw new BadRequestException(`Unsupported kind: ${String(kind)}`)
     if (hasEncryptedPayload) return
@@ -533,6 +535,7 @@ export class MessagesService {
     const hasPoll = !!input.poll
     const hasEvent = !!input.event
     const hasLocation = !!(input as any).location
+    const hasBibleVerse = !!(input as any).bibleVerse
 
     switch (kind) {
       case 'text':
@@ -562,6 +565,9 @@ export class MessagesService {
       case 'location':
         if (!hasLocation) throw new BadRequestException('location requires location payload')
         break
+      case 'bible_verse':
+        if (!hasBibleVerse) throw new BadRequestException('bible_verse requires bibleVerse payload')
+        break
       case 'system':
         if (!hasText) throw new BadRequestException('system requires text')
         break
@@ -577,6 +583,7 @@ export class MessagesService {
     if (kind !== 'poll' && hasPoll) throw new BadRequestException('poll payload only allowed for poll kind')
     if (kind !== 'event' && hasEvent) throw new BadRequestException('event payload only allowed for event kind')
     if (kind !== 'location' && hasLocation) throw new BadRequestException('location payload only allowed for location kind')
+    if (kind !== 'bible_verse' && hasBibleVerse) throw new BadRequestException('bibleVerse payload only allowed for bible_verse kind')
   }
 
   private buildPreview(input: SendMessageDto): string | undefined {
@@ -610,6 +617,8 @@ export class MessagesService {
         return `📅 ${input.event?.title ?? 'Event'}`
       case 'location':
         return `📍 ${(input as any).location?.title ?? (input as any).location?.address ?? 'Location'}`
+      case 'bible_verse':
+        return `📖 ${(input as any).bibleVerse?.reference ?? 'Bible verse'}`
       case 'system':
         return input.text?.slice(0, 200)
       case 'call_event':

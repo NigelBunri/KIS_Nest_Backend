@@ -16,6 +16,7 @@ export enum MessageKind {
   EVENT = 'event',
   LOCATION = 'location',
   CALL_EVENT = 'call_event',
+  BIBLE_VERSE = 'bible_verse',
 }
 
 /**
