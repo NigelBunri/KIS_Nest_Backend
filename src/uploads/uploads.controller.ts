@@ -376,6 +376,10 @@ export class UploadsController {
       durationSeconds: body.duration_seconds,
       host,
       proto,
+      title: body.title,
+      description: body.description,
+      channelId: body.channelId,
+      thumbnailAttachmentId: body.thumbnailAttachmentId,
     });
     return { ok: true, attachment };
   }

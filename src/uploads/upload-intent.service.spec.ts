@@ -24,6 +24,16 @@ function makeStorage(overrides: Partial<Record<string, any>> = {}) {
   } as any
 }
 
+// Default: never called — every existing fixture has no `context`, so
+// confirm()'s broadcast_video branch (the only caller of djangoMedia)
+// never triggers for these pre-existing tests.
+function makeDjangoMedia(overrides: Partial<Record<string, any>> = {}) {
+  return {
+    processVideoUpload: jest.fn(),
+    ...overrides,
+  } as any
+}
+
 function makeConfirmableIntent(overrides: Partial<Record<string, any>> = {}) {
   return {
     uploadId: 'a1a1a1a1-1111-1111-1111-111111111111',
@@ -42,7 +52,7 @@ function makeConfirmableIntent(overrides: Partial<Record<string, any>> = {}) {
 describe('UploadIntentService.initiate', () => {
   it('returns an explicit uploadId that is distinct from, and never contains, the storage key', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     const result = await service.initiate({
       userId: 'user-1',
@@ -63,7 +73,7 @@ describe('UploadIntentService.initiate', () => {
 
   it('never derives the storage key from client input (server-controlled, unique per call)', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     const first = await service.initiate({ userId: 'user-1', filename: 'video.mp4', contentType: 'video/mp4', sizeBytes: 100 })
     const second = await service.initiate({ userId: 'user-1', filename: 'video.mp4', contentType: 'video/mp4', sizeBytes: 100 })
@@ -74,7 +84,7 @@ describe('UploadIntentService.initiate', () => {
 
   it('accepts a video/mp4 under the configured size limit (17.7MB test file)', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(
       service.initiate({ userId: 'user-1', filename: 'video.mp4', contentType: 'video/mp4', sizeBytes: 17711064 }),
@@ -83,7 +93,7 @@ describe('UploadIntentService.initiate', () => {
 
   it('rejects an oversized upload with the project standard 400 error', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(
       service.initiate({
@@ -97,7 +107,7 @@ describe('UploadIntentService.initiate', () => {
 
   it('rejects an unsupported MIME type with the project standard 400 error', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(
       service.initiate({ userId: 'user-1', filename: 'file.bin', contentType: 'application/x-bogus', sizeBytes: 100 }),
@@ -110,7 +120,7 @@ describe('UploadIntentService.confirm', () => {
     const intent = makeConfirmableIntent()
     const intentModel = makeIntentModel()
     intentModel.findOne.mockResolvedValue(intent)
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     const attachment: any = await service.confirm({ userId: 'user-1', uploadId: intent.uploadId })
 
@@ -123,7 +133,7 @@ describe('UploadIntentService.confirm', () => {
     const intent = makeConfirmableIntent()
     const intentModel = makeIntentModel()
     intentModel.findOne.mockResolvedValue(intent)
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     const attachment: any = await service.confirm({ userId: 'user-1', uploadId: intent.uploadId })
 
@@ -134,7 +144,7 @@ describe('UploadIntentService.confirm', () => {
 
   it('rejects a storage key sent as the confirm id with a controlled 400, not a DB lookup', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(
       service.confirm({
@@ -148,7 +158,7 @@ describe('UploadIntentService.confirm', () => {
 
   it('rejects a missing/empty uploadId', async () => {
     const intentModel = makeIntentModel()
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(service.confirm({ userId: 'user-1', uploadId: '' as any })).rejects.toBeInstanceOf(BadRequestException)
   })
@@ -156,10 +166,126 @@ describe('UploadIntentService.confirm', () => {
   it('returns 404-equivalent NotFoundException for an unknown (but well-formed) uploadId', async () => {
     const intentModel = makeIntentModel()
     intentModel.findOne.mockResolvedValue(null)
-    const service = new UploadIntentService(intentModel, makeStorage())
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
 
     await expect(
       service.confirm({ userId: 'user-1', uploadId: 'b2b2b2b2-2222-2222-2222-222222222222' }),
     ).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe('UploadIntentService.confirm — broadcast_video post-confirm webhook', () => {
+  it('calls Django processVideoUpload for a broadcast_video-context video and merges its result into the attachment', async () => {
+    const intent = makeConfirmableIntent({ context: 'broadcast_video' })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const djangoMedia = makeDjangoMedia({
+      processVideoUpload: jest.fn().mockResolvedValue({
+        video_id: 'video-123',
+        video_url: 'https://cdn.example.com/video.mp4',
+        thumbnail_url: 'https://cdn.example.com/thumb.jpg',
+        duration_seconds: 42,
+        type: 'short',
+        scan_status: 'not_configured',
+        quarantined: false,
+        requires_review: false,
+        safety_scan_id: 'scan-1',
+        safety: { status: 'not_configured' },
+        processing_status: 'ready',
+        pipeline: {},
+      }),
+    })
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    const attachment: any = await service.confirm({
+      userId: 'user-1',
+      uploadId: intent.uploadId,
+      title: 'My video',
+      channelId: 'chan-1',
+    })
+
+    expect(djangoMedia.processVideoUpload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectKey: intent.objectKey,
+        mimeType: 'video/mp4',
+        title: 'My video',
+        channelId: 'chan-1',
+        userId: 'user-1',
+      }),
+    )
+    // Django's video id becomes the attachment's identity — downstream
+    // consumers (mapServerVideoAttachment on the RN side) key off this.
+    expect(attachment.id).toBe('video-123')
+    expect(attachment.video_url).toBe('https://cdn.example.com/video.mp4')
+    expect(attachment.duration_seconds).toBe(42)
+  })
+
+  it('resolves a thumbnailAttachmentId to its real objectKey before calling Django, never passing the client-facing id itself', async () => {
+    const intent = makeConfirmableIntent({ context: 'broadcast_video' })
+    const thumbIntent = { attachmentId: 'thumb-attachment-1', objectKey: '2026-08-02/thumb.jpg', status: 'confirmed' }
+    const intentModel = makeIntentModel()
+    // Two distinct lookups happen inside confirm(): the main intent (awaited
+    // directly, no .lean()/.exec()) and the thumbnail intent (chained
+    // through .lean().exec()) — mock each shape on its own call.
+    intentModel.findOne = jest
+      .fn()
+      .mockReturnValueOnce(Promise.resolve(intent))
+      .mockReturnValueOnce({ lean: () => ({ exec: () => Promise.resolve(thumbIntent) }) })
+    const djangoMedia = makeDjangoMedia({
+      processVideoUpload: jest.fn().mockResolvedValue({
+        video_id: 'video-123',
+        video_url: '',
+        thumbnail_url: '',
+        duration_seconds: 10,
+        type: 'short',
+        scan_status: 'not_configured',
+        quarantined: false,
+        requires_review: false,
+        safety_scan_id: 'scan-1',
+        safety: {},
+        processing_status: 'ready',
+        pipeline: {},
+      }),
+    })
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    await service.confirm({
+      userId: 'user-1',
+      uploadId: intent.uploadId,
+      thumbnailAttachmentId: 'thumb-attachment-1',
+    })
+
+    expect(djangoMedia.processVideoUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ thumbnailObjectKey: '2026-08-02/thumb.jpg' }),
+    )
+  })
+
+  it('never marks the intent confirmed if the Django webhook fails — no orphaned attachment with no BroadcastVideo behind it', async () => {
+    const intent = makeConfirmableIntent({ context: 'broadcast_video' })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const djangoMedia = makeDjangoMedia({
+      processVideoUpload: jest.fn().mockRejectedValue(new Error('Django unreachable')),
+    })
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    await expect(
+      service.confirm({ userId: 'user-1', uploadId: intent.uploadId }),
+    ).rejects.toThrow('Django unreachable')
+
+    expect(intent.status).not.toBe('confirmed')
+    expect(intent.save).not.toHaveBeenCalled()
+  })
+
+  it('does not call Django for a non-broadcast_video context, even if the file happens to be a video', async () => {
+    const intent = makeConfirmableIntent({ context: 'chat' })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const djangoMedia = makeDjangoMedia()
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    await service.confirm({ userId: 'user-1', uploadId: intent.uploadId })
+
+    expect(djangoMedia.processVideoUpload).not.toHaveBeenCalled()
   })
 })

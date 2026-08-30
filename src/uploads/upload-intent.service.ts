@@ -24,6 +24,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { randomUUID } from 'crypto';
 import { StorageService } from '../storage/storage.service';
+import { DjangoMediaClient } from '../chat/integrations/django/django-media.client';
 import { UploadIntent, UploadIntentDocument } from './schemas/upload-intent.schema';
 import {
   ATTACHMENT_TTL_DAYS,
@@ -58,6 +59,11 @@ export type ConfirmUploadParams = {
   durationSeconds?: number;
   host?: string;
   proto?: string;
+  // broadcast_video context only — see confirm()'s post-confirm branch.
+  title?: string;
+  description?: string;
+  channelId?: string;
+  thumbnailAttachmentId?: string;
 };
 
 @Injectable()
@@ -65,6 +71,7 @@ export class UploadIntentService {
   constructor(
     @InjectModel(UploadIntent.name) private readonly intentModel: Model<UploadIntentDocument>,
     private readonly storage: StorageService,
+    private readonly djangoMedia: DjangoMediaClient,
   ) {}
 
   async initiate(params: InitiateUploadParams) {
@@ -214,11 +221,44 @@ export class UploadIntentService {
 
     const attachment = this.buildAttachment(intent, meta, params);
 
+    // broadcast_video context: the byte transfer just happened direct-to-S3
+    // (never touching Django), but the video still needs Django's
+    // duration-probe/BroadcastVideo-row/thumbnail work — see
+    // apps/broadcasts/views_internal.py's ProcessBroadcastVideoUploadView,
+    // which does inline (now, via this webhook) what BroadcastVideoUploadView
+    // used to do inside the original multipart-proxy request. Runs
+    // synchronously and can fail hard: a confirmed attachment with no
+    // BroadcastVideo row behind it is an orphaned, unusable state (nothing
+    // for a feed post to reference), so this isn't a best-effort add-on.
+    let finalAttachment: Record<string, unknown> = attachment;
+    if (intent.context === 'broadcast_video' && (attachment.kind === 'video' || attachment.kind === 'short_video')) {
+      let thumbnailObjectKey: string | undefined;
+      if (params.thumbnailAttachmentId) {
+        const thumbIntent = await this.intentModel
+          .findOne({ attachmentId: params.thumbnailAttachmentId, status: 'confirmed' })
+          .lean()
+          .exec();
+        thumbnailObjectKey = thumbIntent?.objectKey;
+      }
+      const processed = await this.djangoMedia.processVideoUpload({
+        objectKey: intent.objectKey,
+        mimeType: actualContentType,
+        originalFilename: intent.originalFilename,
+        sizeBytes: meta.size,
+        title: params.title,
+        description: params.description,
+        channelId: params.channelId,
+        userId: params.userId,
+        thumbnailObjectKey,
+      });
+      finalAttachment = { ...attachment, id: processed.video_id, ...processed };
+    }
+
     intent.status = 'confirmed';
-    intent.confirmedAttachment = attachment;
+    intent.confirmedAttachment = finalAttachment;
     await intent.save();
 
-    return attachment;
+    return finalAttachment;
   }
 
   private buildAttachment(

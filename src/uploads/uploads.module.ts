@@ -11,6 +11,7 @@ import { HttpAuthGuard } from '../auth/http-auth.guard';
 import { StorageModule } from '../storage/storage.module';
 import { Message, MessageSchema } from '../chat/features/messages/schemas/message.schema';
 import { DjangoConversationClient } from '../chat/integrations/django/django-conversation.client';
+import { DjangoMediaClient } from '../chat/integrations/django/django-media.client';
 import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
@@ -25,6 +26,13 @@ import { ObservabilityModule } from '../observability/observability.module';
     ]),
   ],
   controllers: [UploadsController],
-  providers: [HttpAuthGuard, MediaCleanupService, UploadIntentService, AttachmentAccessService, DjangoConversationClient],
+  providers: [
+    HttpAuthGuard,
+    MediaCleanupService,
+    UploadIntentService,
+    AttachmentAccessService,
+    DjangoConversationClient,
+    DjangoMediaClient,
+  ],
 })
 export class UploadsModule {}

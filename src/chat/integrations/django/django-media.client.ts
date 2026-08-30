@@ -18,6 +18,23 @@ export type SignedChatVoiceUrl = {
   expiresInSeconds: number;
 };
 
+export type ProcessedBroadcastVideo = {
+  video_id: string;
+  video_url: string;
+  stream_url: string;
+  thumbnail_url: string;
+  duration_seconds: number;
+  type: string;
+  mime_type: string;
+  scan_status: string;
+  quarantined: boolean;
+  requires_review: boolean;
+  safety_scan_id: string;
+  safety: Record<string, unknown>;
+  processing_status: string;
+  pipeline: Record<string, unknown>;
+};
+
 @Injectable()
 export class DjangoMediaClient {
   constructor(private readonly http: HttpService) {}
@@ -93,6 +110,71 @@ export class DjangoMediaClient {
       // typed upstream failure rather than a generic 500, so the RN client
       // can show "try again" instead of a silent/opaque failure.
       throw new BadGatewayException('Could not reach the media signing service. Please try again.');
+    }
+  }
+
+  /**
+   * Asks Django to run its video-processing pipeline (duration probe,
+   * short/long classification, BroadcastVideo row creation, thumbnail
+   * generation) against a video that already landed in S3 via Nest's
+   * direct-to-S3 flow — see UploadIntentService.confirm(), the only caller.
+   * Mirrors apps/broadcasts/views_internal.py's ProcessBroadcastVideoUploadView
+   * on the Django side, which does inline (not queued) what
+   * BroadcastVideoUploadView used to do inside the original upload request.
+   */
+  async processVideoUpload(args: {
+    objectKey: string;
+    mimeType: string;
+    originalFilename: string;
+    sizeBytes: number;
+    title?: string;
+    description?: string;
+    channelId?: string;
+    userId?: string;
+    thumbnailObjectKey?: string;
+  }): Promise<ProcessedBroadcastVideo> {
+    const base = this.djangoApiBase();
+    const url = base
+      ? `${base}/broadcasts/internal/process-video-upload/`
+      : String(process.env.DJANGO_PROCESS_VIDEO_UPLOAD_URL ?? '').trim();
+    if (!url) {
+      throw new BadGatewayException('Video processing is not configured.');
+    }
+
+    const body: Record<string, unknown> = {
+      objectKey: args.objectKey,
+      mimeType: args.mimeType,
+      originalFilename: args.originalFilename,
+      sizeBytes: args.sizeBytes,
+    };
+    if (args.title) body.title = args.title;
+    if (args.description) body.description = args.description;
+    if (args.channelId) body.channelId = args.channelId;
+    if (args.userId) body.userId = args.userId;
+    if (args.thumbnailObjectKey) body.thumbnailObjectKey = args.thumbnailObjectKey;
+
+    const headers = signedInternalHeaders({
+      method: 'POST',
+      url,
+      body,
+      secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+    });
+
+    try {
+      const res = await firstValueFrom(
+        this.http.post<ProcessedBroadcastVideo>(url, body, { headers, timeout: 60000 }),
+      );
+      if (!res?.data?.video_id) {
+        throw new BadGatewayException('Video processing returned no video id.');
+      }
+      return res.data;
+    } catch (err: any) {
+      if (err instanceof BadGatewayException) throw err;
+      const httpStatus: number | undefined = err?.response?.status;
+      if (httpStatus === 404) {
+        throw new NotFoundException('Uploaded video was not found in storage.');
+      }
+      throw new BadGatewayException('Could not reach the video processing service. Please try again.');
     }
   }
 }
