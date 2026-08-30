@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Post, UseGuards } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Param, Post, UseGuards } from '@nestjs/common'
 
 import { InternalAuthGuard } from '../auth/internal-auth.guard'
 import { AttachmentAccessService } from '../uploads/attachment-access.service'
@@ -16,6 +16,12 @@ type MainTabBadgesUpdatedPayload = {
   source?: string
   reason?: string
   extra?: Record<string, unknown>
+}
+
+type PartnerEventPayload = {
+  event?: string
+  userIds?: string[]
+  data?: Record<string, unknown>
 }
 
 @Controller('internal')
@@ -78,6 +84,38 @@ export class RealtimeInternalController {
     }
 
     return { ok: true, emitted: cleanUserIds.length }
+  }
+
+  // Django calls this after a Partners-system change that affected users
+  // should see live (kick/ban, role update, invite redeemed, channel or
+  // category created) — see apps.partners.services.notify_nest_of_partner_event
+  // on the Django side. Generic fan-out, same shape as main-tab-badges/updated
+  // above: no partner-scoped socket room exists (or is needed) since every
+  // affected user already has a userRoom from being connected at all.
+  @Post('partners/:partnerId/events')
+  handlePartnerEvent(@Param('partnerId') partnerId: string, @Body() payload: PartnerEventPayload) {
+    const event = String(payload?.event || '').trim()
+    const userIds = Array.from(
+      new Set((Array.isArray(payload?.userIds) ? payload.userIds : []).map((v) => String(v || '').trim()).filter(Boolean)),
+    )
+    if (!event || userIds.length === 0) {
+      return { ok: false }
+    }
+
+    const body = {
+      event,
+      partnerId: String(partnerId || ''),
+      data: payload?.data || {},
+      at: new Date().toISOString(),
+    }
+
+    for (const userId of userIds) {
+      try {
+        this.gateway.server?.to(rooms.userRoom(userId)).emit(event, { ...body, userId })
+      } catch {}
+    }
+
+    return { ok: true, emitted: userIds.length }
   }
 
   // Django's async explicit-content scan calls this after confirming a
