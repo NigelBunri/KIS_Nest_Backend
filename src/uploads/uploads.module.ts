@@ -34,5 +34,6 @@ import { ObservabilityModule } from '../observability/observability.module';
     DjangoConversationClient,
     DjangoMediaClient,
   ],
+  exports: [AttachmentAccessService],
 })
 export class UploadsModule {}

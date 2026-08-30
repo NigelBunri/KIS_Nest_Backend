@@ -8,6 +8,7 @@ import { AuthModule } from '../auth/auth.module'
 import { ObservabilityModule } from '../observability/observability.module'
 import { WsAuthGuard } from '../auth/ws-auth.guard'
 import { HttpAuthGuard } from '../auth/http-auth.guard'
+import { UploadsModule } from '../uploads/uploads.module'
 
 import { Message, MessageSchema } from './features/messages/schemas/message.schema'
 import {
@@ -71,6 +72,10 @@ import { SfuModule } from '../realtime/sfu/sfu.module'
     // ✅ makes MetricsService available for DjangoConversationClient's
     // fail-closed authorization-denial counters
     ObservabilityModule,
+
+    // ✅ makes AttachmentAccessService available to RealtimeInternalController
+    // for Django's quarantine-callback endpoint (see that controller)
+    UploadsModule,
 
     // Message model is still needed directly here for ReactionsService and
     // ReceiptsService (both @InjectModel(Message.name) consumers declared

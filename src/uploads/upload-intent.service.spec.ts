@@ -30,6 +30,7 @@ function makeStorage(overrides: Partial<Record<string, any>> = {}) {
 function makeDjangoMedia(overrides: Partial<Record<string, any>> = {}) {
   return {
     processVideoUpload: jest.fn(),
+    notifyUploadForScan: jest.fn(),
     ...overrides,
   } as any
 }
@@ -171,6 +172,39 @@ describe('UploadIntentService.confirm', () => {
     await expect(
       service.confirm({ userId: 'user-1', uploadId: 'b2b2b2b2-2222-2222-2222-222222222222' }),
     ).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('notifies Django to scan every confirmed upload for explicit content, regardless of context', async () => {
+    const intent = makeConfirmableIntent({ context: 'chat' })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const djangoMedia = makeDjangoMedia()
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    await service.confirm({ userId: 'user-1', uploadId: intent.uploadId })
+
+    expect(djangoMedia.notifyUploadForScan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectKey: intent.objectKey,
+        mimeType: 'video/mp4',
+        context: 'chat',
+        userId: 'user-1',
+      }),
+    )
+  })
+
+  it('does not let a scan-notification failure break the confirm response (fire-and-forget)', async () => {
+    const intent = makeConfirmableIntent()
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const djangoMedia = makeDjangoMedia({
+      notifyUploadForScan: jest.fn(() => {
+        throw new Error('should never be awaited/propagated')
+      }),
+    })
+    const service = new UploadIntentService(intentModel, makeStorage(), djangoMedia)
+
+    await expect(service.confirm({ userId: 'user-1', uploadId: intent.uploadId })).resolves.toBeDefined()
   })
 })
 

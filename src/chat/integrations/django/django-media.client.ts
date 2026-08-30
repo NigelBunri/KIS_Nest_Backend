@@ -177,4 +177,47 @@ export class DjangoMediaClient {
       throw new BadGatewayException('Could not reach the video processing service. Please try again.');
     }
   }
+
+  /**
+   * Fire-and-forget notification that a direct-to-S3 upload confirmed —
+   * triggers Django's async explicit-content scan (apps/media/tasks.py's
+   * scan_uploaded_object_task) for every upload context, not just broadcast
+   * video. Deliberately not awaited by callers for its result: scanning
+   * happens in the background and must never add latency to the upload
+   * confirm response the end user is waiting on. Errors are swallowed here
+   * for the same reason — a failed notify degrades to "this upload never
+   * got scanned," not to a broken upload.
+   */
+  notifyUploadForScan(args: {
+    objectKey: string;
+    mimeType: string;
+    originalFilename: string;
+    sizeBytes: number;
+    context: string;
+    userId?: string;
+  }): void {
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/media/internal/scan-upload/` : '';
+    if (!url) return;
+
+    const body: Record<string, unknown> = {
+      objectKey: args.objectKey,
+      mimeType: args.mimeType,
+      originalFilename: args.originalFilename,
+      sizeBytes: args.sizeBytes,
+      context: args.context,
+    };
+    if (args.userId) body.userId = args.userId;
+
+    const headers = signedInternalHeaders({
+      method: 'POST',
+      url,
+      body,
+      secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+    });
+
+    firstValueFrom(this.http.post(url, body, { headers, timeout: 8000 })).catch(() => {
+      // Best-effort — see docstring above.
+    });
+  }
 }

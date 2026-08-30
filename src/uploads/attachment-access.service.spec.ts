@@ -196,3 +196,53 @@ describe('AttachmentAccessService.resolveForLegacyKeyDownload', () => {
     await expect(service.resolveForLegacyKeyDownload('unknown-key.jpg', principal)).rejects.toBeInstanceOf(NotFoundException)
   })
 })
+
+describe('AttachmentAccessService.quarantineByStorageKey', () => {
+  function makeUpdatableModel(modifiedCounts: number[]) {
+    const updateOne = jest.fn()
+    modifiedCounts.forEach((count) => updateOne.mockResolvedValueOnce({ modifiedCount: count }))
+    return { updateOne } as any
+  }
+
+  it('flips quarantined/scanStatus on the matching attachment by storageKey', async () => {
+    const model = makeUpdatableModel([1])
+    const service = new AttachmentAccessService(model, makeStorage(), makeDjango())
+
+    const found = await service.quarantineByStorageKey('2026-01-01/uuid-photo.jpg')
+
+    expect(found).toBe(true)
+    expect(model.updateOne).toHaveBeenCalledWith(
+      { 'attachments.storageKey': '2026-01-01/uuid-photo.jpg' },
+      { $set: { 'attachments.$.quarantined': true, 'attachments.$.scanStatus': 'blocked' } },
+    )
+  })
+
+  it('falls back to matching by attachments.id for legacy rows with no storageKey', async () => {
+    const model = makeUpdatableModel([0, 1])
+    const service = new AttachmentAccessService(model, makeStorage(), makeDjango())
+
+    const found = await service.quarantineByStorageKey('legacy-key-as-id')
+
+    expect(found).toBe(true)
+    expect(model.updateOne).toHaveBeenNthCalledWith(
+      2,
+      { 'attachments.id': 'legacy-key-as-id' },
+      { $set: { 'attachments.$.quarantined': true, 'attachments.$.scanStatus': 'blocked' } },
+    )
+  })
+
+  it('returns false when no message has a matching attachment (never throws)', async () => {
+    const model = makeUpdatableModel([0, 0])
+    const service = new AttachmentAccessService(model, makeStorage(), makeDjango())
+
+    await expect(service.quarantineByStorageKey('unknown-key')).resolves.toBe(false)
+  })
+
+  it('returns false for an empty objectKey without touching the database', async () => {
+    const model = makeUpdatableModel([])
+    const service = new AttachmentAccessService(model, makeStorage(), makeDjango())
+
+    await expect(service.quarantineByStorageKey('')).resolves.toBe(false)
+    expect(model.updateOne).not.toHaveBeenCalled()
+  })
+})

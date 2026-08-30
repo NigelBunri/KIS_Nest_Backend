@@ -1,6 +1,7 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Post, UseGuards } from '@nestjs/common'
 
 import { InternalAuthGuard } from '../auth/internal-auth.guard'
+import { AttachmentAccessService } from '../uploads/attachment-access.service'
 import { rooms } from '../chat/chat.types'
 import { ChatGateway } from './chat.gateway'
 
@@ -20,7 +21,10 @@ type MainTabBadgesUpdatedPayload = {
 @Controller('internal')
 @UseGuards(InternalAuthGuard)
 export class RealtimeInternalController {
-  constructor(private readonly gateway: ChatGateway) {}
+  constructor(
+    private readonly gateway: ChatGateway,
+    private readonly attachmentAccess: AttachmentAccessService,
+  ) {}
 
   @Post('conversations/created')
   handleConversationCreated(@Body() payload: ConversationCreatedPayload) {
@@ -74,5 +78,18 @@ export class RealtimeInternalController {
     }
 
     return { ok: true, emitted: cleanUserIds.length }
+  }
+
+  // Django's async explicit-content scan calls this after confirming a
+  // violation on a direct-to-S3 upload (see apps/media/tasks.py's
+  // scan_uploaded_object_task on the Django side) — takes the content down
+  // immediately by flipping the matching attachment's quarantined flag.
+  @Post('attachments/quarantine')
+  quarantineAttachment(@Body() body: { objectKey?: string }) {
+    const objectKey = String(body?.objectKey || '').trim()
+    if (!objectKey) {
+      throw new BadRequestException('objectKey is required.')
+    }
+    return this.attachmentAccess.quarantineByStorageKey(objectKey).then((found) => ({ ok: true, found }))
   }
 }

@@ -231,4 +231,31 @@ export class AttachmentAccessService {
     const path = `/uploads/${encodeURIComponent(attachmentId)}/stream`;
     return origin ? `${origin.replace(/\/$/, '')}${path}` : path;
   }
+
+  /**
+   * Trusted-internal only (see uploads.controller.ts's quarantine route) —
+   * Django's async content-safety scan calls this after confirming a
+   * violation, to take the content down immediately. Matches by
+   * attachments[].storageKey since that's the same objectKey Django scanned
+   * (see UploadIntentService.confirm(), which now notifies Django of every
+   * direct-to-S3 upload, not just broadcast video). Voice notes and
+   * stickers are covered too — handleSendVoice/handleSendSticker persist
+   * the same object into attachments[0] as a redundant copy specifically
+   * for lookups like this one.
+   */
+  async quarantineByStorageKey(objectKey: string): Promise<boolean> {
+    if (!objectKey) return false;
+    const result = await this.messageModel.updateOne(
+      { 'attachments.storageKey': objectKey },
+      { $set: { 'attachments.$.quarantined': true, 'attachments.$.scanStatus': 'blocked' } },
+    );
+    if (result.modifiedCount > 0) return true;
+    // Legacy rows persisted before storageKey existed used the storage key
+    // itself as `id` (see storageKeyFor's own fallback) — try that shape too.
+    const legacyResult = await this.messageModel.updateOne(
+      { 'attachments.id': objectKey },
+      { $set: { 'attachments.$.quarantined': true, 'attachments.$.scanStatus': 'blocked' } },
+    );
+    return legacyResult.modifiedCount > 0;
+  }
 }

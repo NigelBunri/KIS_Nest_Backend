@@ -254,6 +254,27 @@ export class UploadIntentService {
       finalAttachment = { ...attachment, id: processed.video_id, ...processed };
     }
 
+    // Every confirmed direct-to-S3 upload gets scanned for explicit content,
+    // regardless of context — this is the general-purpose screening pass,
+    // separate from broadcast_video's synchronous processing above (which
+    // handles duration/thumbnail/BroadcastVideo-row work, not content
+    // safety). Fire-and-forget: never adds latency here, and a flagged
+    // upload gets taken down asynchronously via Django calling back to
+    // POST /internal/attachments/quarantine once the scan completes.
+    try {
+      this.djangoMedia.notifyUploadForScan({
+        objectKey: intent.objectKey,
+        mimeType: actualContentType,
+        originalFilename: intent.originalFilename,
+        sizeBytes: meta.size,
+        context: intent.context,
+        userId: params.userId,
+      });
+    } catch {
+      // Truly fire-and-forget — even a synchronous throw here must never
+      // break the confirm response.
+    }
+
     intent.status = 'confirmed';
     intent.confirmedAttachment = finalAttachment;
     await intent.save();
