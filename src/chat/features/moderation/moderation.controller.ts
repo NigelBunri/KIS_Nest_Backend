@@ -62,6 +62,13 @@ export class ModerationController {
       note,
     })
 
+    // Best-effort mirror into Django's staff moderation queue - see
+    // notifyMessageReported's docstring. Never blocks the report response;
+    // the Mongo write above already succeeded and is the report of record.
+    this.djangoConversationClient
+      .notifyMessageReported({ conversationId, messageId, reportedBy: principal.userId, reason, note })
+      .catch(() => {})
+
     return { ok: true }
   }
 

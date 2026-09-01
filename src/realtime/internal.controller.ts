@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Param, Post, UseGuards } from '@
 
 import { InternalAuthGuard } from '../auth/internal-auth.guard'
 import { AttachmentAccessService } from '../uploads/attachment-access.service'
+import { MessagesService } from '../chat/features/messages/messages.service'
 import { rooms } from '../chat/chat.types'
 import { ChatGateway } from './chat.gateway'
 
@@ -30,6 +31,7 @@ export class RealtimeInternalController {
   constructor(
     private readonly gateway: ChatGateway,
     private readonly attachmentAccess: AttachmentAccessService,
+    private readonly messagesService: MessagesService,
   ) {}
 
   @Post('conversations/created')
@@ -129,5 +131,69 @@ export class RealtimeInternalController {
       throw new BadRequestException('objectKey is required.')
     }
     return this.attachmentAccess.quarantineByStorageKey(objectKey).then((found) => ({ ok: true, found }))
+  }
+
+  // Django's account-purge sweep calls this once a deleted account's grace
+  // period has elapsed (apps.accounts.tasks.purge_accounts_past_grace_period
+  // on the Django side) - Django hard-deleting the user row does nothing to
+  // this user's chat messages, which live entirely in Mongo, so without this
+  // call "delete account" would only ever remove the Django row while every
+  // message they sent stayed fully readable to other members forever.
+  @Post('users/:userId/purge-messages')
+  async purgeUserMessages(@Param('userId') userId: string) {
+    const cleanUserId = String(userId || '').trim()
+    if (!cleanUserId) {
+      throw new BadRequestException('userId is required.')
+    }
+
+    const { scrubbed, conversationIds } = await this.messagesService.purgeMessagesForUser(cleanUserId)
+
+    for (const conversationId of conversationIds) {
+      try {
+        this.gateway.server?.to(rooms.convRoom(conversationId)).emit('messages.purged', {
+          conversationId,
+          senderId: cleanUserId,
+          reason: 'account_deletion',
+        })
+      } catch {}
+    }
+
+    return { ok: true, scrubbed, conversations: conversationIds.length }
+  }
+
+  // Django's StaffModerationOperationActionView calls this when a staff
+  // moderator actions ("block") a chat_message_report - the follow-through
+  // on making chat message reports actually decidable, not just visible in
+  // the staff queue (see apps.moderation.views._staff_queue_chat_message_
+  // report_rows and ChatMessageReportView on the Django side). Unlike a
+  // user's own delete-for-everyone (deleteMessageLegacy), this doesn't
+  // require the caller to be the message's sender - authorization here is
+  // Django's IsAdminUser check on the report action, not sender identity.
+  @Post('conversations/:conversationId/messages/:messageId/moderate-delete')
+  async moderatorDeleteMessage(
+    @Param('conversationId') conversationId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const cleanConversationId = String(conversationId || '').trim()
+    const cleanMessageId = String(messageId || '').trim()
+    if (!cleanConversationId || !cleanMessageId) {
+      throw new BadRequestException('conversationId and messageId are required.')
+    }
+
+    const { found } = await this.messagesService.moderatorDeleteMessage({
+      conversationId: cleanConversationId,
+      messageId: cleanMessageId,
+    })
+
+    if (found) {
+      try {
+        this.gateway.server?.to(rooms.convRoom(cleanConversationId)).emit('message.moderated_delete', {
+          conversationId: cleanConversationId,
+          messageId: cleanMessageId,
+        })
+      } catch {}
+    }
+
+    return { ok: true, found }
   }
 }

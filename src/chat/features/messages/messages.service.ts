@@ -318,6 +318,114 @@ export class MessagesService {
   }
 
   /**
+   * Account-deletion purge (Django apps.accounts.tasks.
+   * purge_accounts_past_grace_period calls internal/users/:userId/purge-
+   * messages, which calls this). Unlike deleteMessageLegacy above - which
+   * only ever flips isDeleted/deleteState and leaves the underlying content
+   * fields in place, relying on clients to hide it - this actually clears
+   * every content-bearing field server-side. That distinction matters here
+   * specifically because this runs after the account is already gone: there
+   * is no user left to reverse a soft-delete for, so leaving real content
+   * sitting in Mongo would mean "delete account" hadn't actually deleted
+   * this user's message content, just hidden it.
+   *
+   * conversationId/senderId/clientId/seq/kind/threadId/replyToId/timestamps
+   * are left alone - they're structural (other participants' message
+   * ordering and reply threads depend on them), not personal content.
+   *
+   * Returns the distinct conversation ids touched, so the caller can notify
+   * connected clients in those rooms to refresh.
+   */
+  async purgeMessagesForUser(userId: string): Promise<{ scrubbed: number; conversationIds: string[] }> {
+    const filter = { senderId: userId, isDeleted: { $ne: true } }
+    const conversationIds = await this.messageModel.distinct('conversationId', filter)
+
+    const nowMs = Date.now()
+    const result = await this.messageModel.updateMany(filter, {
+      $set: {
+        isDeleted: true,
+        deleteState: 'deleted_for_everyone',
+        deletedAt: nowMs,
+        deletedBy: userId,
+      },
+      $unset: {
+        text: '',
+        styledText: '',
+        voice: '',
+        sticker: '',
+        attachments: '',
+        media: '',
+        contacts: '',
+        poll: '',
+        event: '',
+        location: '',
+        bibleVerse: '',
+        linkPreview: '',
+        previewText: '',
+        ciphertext: '',
+        encryptionMeta: '',
+        iv: '',
+        tag: '',
+        aad: '',
+      },
+    })
+
+    return {
+      scrubbed: result.modifiedCount ?? 0,
+      conversationIds: conversationIds.map((id) => String(id)),
+    }
+  }
+
+  /**
+   * Staff moderation take-down (Django's StaffModerationOperationActionView
+   * "block" action on a chat_message_report calls this, via
+   * internal.controller.ts POST internal/conversations/:conversationId/
+   * messages/:messageId/moderate-delete). Same content-scrubbing shape as
+   * purgeMessagesForUser above, but for exactly one message and without the
+   * senderId===requesterId check deleteMessageLegacy enforces - a staff
+   * take-down is authorized by Django's IsAdminUser check on the report
+   * action, not by being the message's own sender.
+   */
+  async moderatorDeleteMessage(args: {
+    conversationId: string
+    messageId: string
+  }): Promise<{ found: boolean }> {
+    const nowMs = Date.now()
+    const result = await this.messageModel.updateOne(
+      { _id: args.messageId, conversationId: args.conversationId, isDeleted: { $ne: true } },
+      {
+        $set: {
+          isDeleted: true,
+          deleteState: 'deleted_for_everyone',
+          deletedAt: nowMs,
+          deletedBy: 'moderation',
+        },
+        $unset: {
+          text: '',
+          styledText: '',
+          voice: '',
+          sticker: '',
+          attachments: '',
+          media: '',
+          contacts: '',
+          poll: '',
+          event: '',
+          location: '',
+          bibleVerse: '',
+          linkPreview: '',
+          previewText: '',
+          ciphertext: '',
+          encryptionMeta: '',
+          iv: '',
+          tag: '',
+          aad: '',
+        },
+      },
+    )
+    return { found: (result.matchedCount ?? 0) > 0 }
+  }
+
+  /**
    * Consumes a view-once message: strips its content and records that it's
    * been opened, without deleting it (isDeleted is a real delete-for-
    * everyone, rendered client-side as "Message deleted" - a view-once

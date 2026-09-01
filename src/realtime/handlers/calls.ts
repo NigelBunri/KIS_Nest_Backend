@@ -251,10 +251,34 @@ function createCallHandler(
       }
 
       // Collect invitee IDs for CALL_OFFER — needed for routing below
-      const offerInviteeIds: string[] =
+      let offerInviteeIds: string[] =
         event === EVT.CALL_OFFER && Array.isArray(payload?.inviteeUserIds)
           ? payload.inviteeUserIds.map(String).filter((id) => id && id !== principal.userId)
           : []
+
+      // Standalone calls skip assertMember (no conversation to check
+      // membership against - see above), so this is the only place a
+      // standalone call.offer's invitee list ever gets an interpersonal-
+      // block check at all. Without it, a blocked user could still ring
+      // the person who blocked them via this path even though blocking
+      // stops them everywhere else in chat. Silently drop blocked invitees
+      // rather than rejecting the whole offer, so an unaffected invitee in
+      // a group standalone call still gets rung.
+      if (
+        event === EVT.CALL_OFFER &&
+        conversationId.startsWith('standalone:') &&
+        offerInviteeIds.length > 0 &&
+        deps.djangoConversationClient.checkBlockedAmong
+      ) {
+        const blockedIds = await deps.djangoConversationClient.checkBlockedAmong(principal.userId, offerInviteeIds)
+        if (blockedIds.length > 0) {
+          const blockedSet = new Set(blockedIds)
+          offerInviteeIds = offerInviteeIds.filter((id) => !blockedSet.has(id))
+        }
+        if (offerInviteeIds.length === 0) {
+          return safeAck(ack, err('Call not allowed', 'BLOCKED'))
+        }
+      }
       // Set true below when this call.offer is a duplicate/retried emit for a
       // callId that already exists (e.g. a client resending after a socket
       // reconnect) — in that case invitees were already pushed once and must
@@ -288,6 +312,31 @@ function createCallHandler(
 
         if (event === EVT.CALL_ANSWER) {
           const callToJoin = await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
+
+          // Standalone calls skip assertMember (no conversation to check
+          // membership against), and setParticipantStatus below will
+          // happily $push a brand-new participant for anyone who reaches
+          // this point - there's no invite-list check here by design (an
+          // uninvited person joining via a shared invite link is the
+          // intended flow, see calls.controller.ts joinByToken). But a
+          // block between the joiner and the call's creator must still
+          // stop the join outright, the same as it stops a DM or a
+          // ws-perms-checked group call - otherwise blocking someone would
+          // do nothing to stop them joining a call THEY started.
+          if (
+            conversationId.startsWith('standalone:') &&
+            callToJoin?.createdBy &&
+            callToJoin.createdBy !== principal.userId &&
+            deps.djangoConversationClient.checkBlockedAmong
+          ) {
+            const blockedIds = await deps.djangoConversationClient.checkBlockedAmong(principal.userId, [
+              String(callToJoin.createdBy),
+            ])
+            if (blockedIds.length > 0) {
+              return safeAck(ack, err('Call not allowed', 'BLOCKED'))
+            }
+          }
+
           // Enforce participant caps. Broadcast is viewer-counted separately.
           const MAX_PARTICIPANTS: Record<string, number> = {
             voice: 2, video: 2, 'voice-group': 100, 'video-group': 32, broadcast: 1000,

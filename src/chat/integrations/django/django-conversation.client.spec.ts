@@ -147,3 +147,74 @@ describe('DjangoConversationClient.wsPerms — fail-closed authorization', () =>
     expect(http.get).not.toHaveBeenCalled()
   })
 })
+
+describe('DjangoConversationClient.checkBlockedAmong — standalone call block check', () => {
+  it('returns the blocked user ids Django reports', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { blockedUserIds: ['user-2'] } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    const result = await client.checkBlockedAmong('user-1', ['user-2', 'user-3'])
+
+    expect(result).toEqual(['user-2'])
+    expect(http.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns an empty array without a network call when there are no other user ids', async () => {
+    const http = { get: jest.fn() }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    const result = await client.checkBlockedAmong('user-1', [])
+
+    expect(result).toEqual([])
+    expect(http.get).not.toHaveBeenCalled()
+  })
+
+  it('fails closed: treats every invitee as blocked when Django is unreachable', async () => {
+    const http = { get: jest.fn().mockReturnValue(throwError(() => new Error('ECONNREFUSED'))) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    const result = await client.checkBlockedAmong('user-1', ['user-2', 'user-3'])
+
+    expect(result.sort()).toEqual(['user-2', 'user-3'])
+  })
+
+  it('deduplicates the other-user-id list before calling Django', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { blockedUserIds: [] } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.checkBlockedAmong('user-1', ['user-2', 'user-2', 'user-3'])
+
+    const [, config] = http.get.mock.calls[0]
+    expect(config.params.otherUserIds).toBe('user-2,user-3')
+  })
+})
+
+describe('DjangoConversationClient.notifyMessageReported — mirrors a chat report into Django', () => {
+  it('posts the report to Django', async () => {
+    const http = { get: jest.fn(), post: jest.fn().mockReturnValue(of({ data: { ok: true } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.notifyMessageReported({
+      conversationId: 'conv-1',
+      messageId: 'msg-1',
+      reportedBy: 'user-1',
+      reason: 'spam',
+    })
+
+    expect(http.post).toHaveBeenCalledTimes(1)
+    const [url, body] = http.post.mock.calls[0]
+    expect(url).toContain('/chat/internal/message-reports/')
+    expect(body).toEqual(
+      expect.objectContaining({ conversationId: 'conv-1', messageId: 'msg-1', reportedBy: 'user-1', reason: 'spam' }),
+    )
+  })
+
+  it('never throws when Django is unreachable — best-effort only', async () => {
+    const http = { get: jest.fn(), post: jest.fn().mockReturnValue(throwError(() => new Error('ECONNREFUSED'))) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await expect(
+      client.notifyMessageReported({ conversationId: 'conv-1', messageId: 'msg-1', reportedBy: 'user-1' }),
+    ).resolves.toBeUndefined()
+  })
+})

@@ -8,6 +8,7 @@ export interface RoomsDeps {
   // Django ws-perms client (source of truth)
   djangoConversationClient: {
     assertMember(principal: SocketPrincipal, conversationId: string): Promise<any>
+    checkBlockedAmong?(callerUserId: string, otherUserIds: string[]): Promise<string[]>
   }
 }
 

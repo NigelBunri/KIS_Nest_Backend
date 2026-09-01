@@ -234,6 +234,96 @@ export class DjangoConversationClient {
     return perms;
   }
 
+  /**
+   * Standalone calls (`standalone:<callId>`) have no Django conversation
+   * record, so assertMember() above is skipped for them entirely (see
+   * realtime/handlers/calls.ts) - they had no interpersonal-block check of
+   * any kind before this. Real conversations get theirs from wsPerms(); this
+   * is the equivalent for a standalone call's invitee list.
+   *
+   * Django endpoint:
+   *   GET /api/v1/chat/internal/blocked-among/?userId=X&otherUserIds=a,b,c
+   *
+   * Returns the subset of otherUserIds blocked (either direction) with the
+   * caller. Fails closed: if Django can't be reached, every otherUserId is
+   * treated as blocked rather than letting an unconfirmed check pass.
+   */
+  async checkBlockedAmong(
+    callerUserId: string,
+    otherUserIds: string[],
+  ): Promise<string[]> {
+    const uniqueOtherIds = Array.from(new Set(otherUserIds.filter(Boolean)));
+    if (uniqueOtherIds.length === 0) return [];
+
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/chat/internal/blocked-among/` : undefined;
+    if (!url) {
+      this.logger.error('[checkBlockedAmong] DJANGO_API_URL is not configured — denying all invitees');
+      return uniqueOtherIds;
+    }
+
+    const params = { userId: callerUserId, otherUserIds: uniqueOtherIds.join(',') };
+    try {
+      const res = await firstValueFrom(
+        this.http.get<{ blockedUserIds?: string[] }>(url, {
+          headers: signedInternalHeaders({ method: 'GET', url, params, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
+          params,
+          timeout: 5000,
+        }),
+      );
+      return Array.isArray(res.data?.blockedUserIds) ? res.data.blockedUserIds.map(String) : [];
+    } catch (err: any) {
+      this.logger.warn(
+        `[checkBlockedAmong] Django unreachable — denying all invitees for caller=${callerUserId}: ${err?.message ?? 'unknown error'}`,
+      );
+      return uniqueOtherIds;
+    }
+  }
+
+  /**
+   * Mirrors a chat message report into Django's staff moderation queue
+   * (apps.chat.views_introspect.ChatMessageReportView). Nest's own local
+   * Mongo MessageReport (ModerationService.reportMessage) was previously
+   * the ONLY place a chat report was recorded - no admin surface in Django
+   * ever saw it. Best-effort and non-blocking: a failure here must never
+   * fail the user's report action, since the Mongo write already
+   * succeeded and is the report of record either way.
+   */
+  async notifyMessageReported(input: {
+    conversationId: string;
+    messageId: string;
+    reportedBy: string;
+    reason?: string;
+    note?: string;
+  }): Promise<void> {
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/chat/internal/message-reports/` : undefined;
+    if (!url) {
+      this.logger.error('[notifyMessageReported] DJANGO_API_URL is not configured — report will not appear in the staff queue');
+      return;
+    }
+
+    const body = {
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      reportedBy: input.reportedBy,
+      reason: input.reason,
+      note: input.note,
+    };
+    try {
+      await firstValueFrom(
+        this.http.post(url, body, {
+          headers: signedInternalHeaders({ method: 'POST', url, body, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
+          timeout: 5000,
+        }),
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `[notifyMessageReported] Django unreachable — report for message=${input.messageId} will not appear in the staff queue: ${err?.message ?? 'unknown error'}`,
+      );
+    }
+  }
+
   async updateLastMessage(args: {
     conversationId: string;
     createdAt: Date;

@@ -282,6 +282,19 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       if (!canSend) {
         throw new Error('Send not allowed in this conversation')
       }
+      // Nest's own per-conversation self-block/self-mute (Mongo
+      // ConversationBlock/ConversationMute, "mute/block this chat for
+      // myself") was already enforced for edit/delete/typing/receipts/
+      // reactions but never for the send path itself - the one action
+      // this whole feature exists to gate. See moderationService.assertAllowed.
+      if (deps.moderationService) {
+        stage = 'send.moderation'
+        await deps.moderationService.assertAllowed({
+          conversationId,
+          userId: principal.userId,
+          action: 'send',
+        })
+      }
       if (deps.djangoConversationClient.policyCheck) {
         stage = 'send.policy_check'
         const policy = await deps.djangoConversationClient.policyCheck({
