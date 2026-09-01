@@ -293,7 +293,7 @@ export class CallsController {
     },
   ) {
     // Validate auth - throw 401 if missing/invalid; otherwise silently accept.
-    await this.resolveUser(req)
+    const principal = await this.resolveUser(req)
     // Best-effort: if we can locate the call document, stamp it with the
     // client-reported duration / ended_at.  Non-fatal if not found.
     if (body.call_id) {
@@ -301,7 +301,9 @@ export class CallsController {
         // We don't have the conversationId here, so use a lightweight query.
         // The service exposes endCall only by conversationId+callId, so we fall
         // back to a direct Mongoose patch through a new thin helper.
-        await this.callsService.patchCallById(body.call_id, {
+        // patchCallById itself requires principal.userId to match the call's
+        // createdBy/participants before writing anything - see its comment.
+        await this.callsService.patchCallById(body.call_id, principal.userId, {
           ...(body.ended_at ? { endedAt: new Date(body.ended_at) } : {}),
         })
       } catch {

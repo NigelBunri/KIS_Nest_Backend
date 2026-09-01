@@ -557,15 +557,24 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
    * not received, e.g. due to a network drop).
    *
    * Only writes endedAt when the call is not already ended, to avoid
-   * overwriting the authoritative server-side value.
+   * overwriting the authoritative server-side value. requestingUserId is
+   * matched against createdBy/participants in the SAME atomic query as the
+   * write, so an authenticated user who was never on this call (guessed or
+   * leaked callId) cannot tamper with its end metadata - the update simply
+   * matches zero documents for them instead.
    */
   async patchCallById(
     callId: string,
+    requestingUserId: string,
     patch: Partial<{ endedAt: Date }>,
   ): Promise<void> {
-    if (!callId || !patch.endedAt) return
+    if (!callId || !requestingUserId || !patch.endedAt) return
     await this.calls.updateOne(
-      { callId, status: { $ne: 'ended' } },
+      {
+        callId,
+        status: { $ne: 'ended' },
+        $or: [{ createdBy: requestingUserId }, { 'participants.userId': requestingUserId }],
+      },
       { $set: { endedAt: patch.endedAt, isActiveInConversation: false } },
     )
   }

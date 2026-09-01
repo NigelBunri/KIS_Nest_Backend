@@ -41,18 +41,36 @@ export class ThreadsService {
     }
   }
 
+  /**
+   * Read-only lookup used by callers (see realtime/handlers/groups.ts) to
+   * discover which conversation a threadId belongs to BEFORE doing anything
+   * mutating with it, so they can run a membership check against that
+   * conversation first.
+   */
+  async getThreadConversationId(threadId: string): Promise<string | null> {
+    if (!threadId) return null;
+    const thread = await this.threadModel.findById(threadId).select('conversationId').lean();
+    return thread?.conversationId ?? null;
+  }
+
   async renameThread(input: {
     threadId: string;
+    // Required and matched against in the query filter below (not just used
+    // for logging) - this is what actually ties the rename to the
+    // conversation the caller was checked as a member of. A caller must
+    // resolve this via getThreadConversationId() and assertMember() against
+    // it first (see realtime/handlers/groups.ts's SUBROOM_RENAME handler).
+    conversationId: string;
     title: string;
     requestedByUserId: string;
   }): Promise<{ id: string; conversationId: string; title: string }> {
-    const { threadId, title } = input;
-    if (!threadId || !title) {
-      throw new BadRequestException('threadId and title are required');
+    const { threadId, conversationId, title } = input;
+    if (!threadId || !title || !conversationId) {
+      throw new BadRequestException('threadId, conversationId and title are required');
     }
 
-    const updated = await this.threadModel.findByIdAndUpdate(
-      threadId,
+    const updated = await this.threadModel.findOneAndUpdate(
+      { _id: threadId, conversationId },
       { $set: { title } },
       { new: true },
     );

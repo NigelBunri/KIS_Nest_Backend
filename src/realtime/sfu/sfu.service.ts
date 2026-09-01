@@ -72,6 +72,13 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
   private transports = new Map<string, any>()
   private producers = new Map<string, any>()
   private consumers = new Map<string, any>()
+  // Ownership of transports/producers, keyed by their own id -> {callId, userId}.
+  // Every mutating call below checks this before touching mediasoup state, so
+  // a transportId/producerId leaking or being guessed doesn't let another
+  // user (even one legitimately in some OTHER call) act on it.
+  private transportOwners = new Map<string, { callId: string; userId: string }>()
+  private producerOwners = new Map<string, { callId: string; userId: string }>()
+  private consumerOwners = new Map<string, { userId: string }>()
 
   get available(): boolean { return !!mediasoup && !!this.router }
 
@@ -117,7 +124,14 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     return room
   }
 
-  getOrCreatePeer(callId: string, userId: string): SfuPeerState {
+  /**
+   * Creates (or returns the existing) peer state for callId+userId. This is
+   * the ONLY entry point that should be called without first checking
+   * getAuthorizedPeer - callers must have already verified the user is a
+   * genuine participant of this specific call (see sfu.ts's SFU_JOIN
+   * handler, which checks CallSession.participants before calling this).
+   */
+  authorizePeer(callId: string, userId: string): SfuPeerState {
     const room = this.getOrCreateRoom(callId)
     let peer = room.peers.get(userId)
     if (!peer) {
@@ -131,6 +145,17 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
       room.peers.set(userId, peer)
     }
     return peer
+  }
+
+  /**
+   * Returns the peer for callId+userId only if they already completed a
+   * verified SFU_JOIN for THIS call - never creates one. Every handler that
+   * isn't SFU_JOIN itself must go through this (or an ownership check keyed
+   * off transportOwners/producerOwners) instead of silently vivifying state
+   * for whatever callId a client happens to send.
+   */
+  getAuthorizedPeer(callId: string, userId: string): SfuPeerState | null {
+    return this.rooms.get(callId)?.peers.get(userId) ?? null
   }
 
   removePeer(callId: string, userId: string) {
@@ -165,10 +190,13 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
 
   async createWebRtcTransport(callId: string, userId: string, direction: SfuTransportDir): Promise<any> {
     if (!this.router) throw new Error('SFU not available')
+    const peer = this.getAuthorizedPeer(callId, userId)
+    if (!peer) throw new Error('Not an authorized participant of this call')
+
     const transport = await this.router.createWebRtcTransport(WEBRTC_TRANSPORT_OPTIONS)
     this.transports.set(transport.id, transport)
+    this.transportOwners.set(transport.id, { callId, userId })
 
-    const peer = this.getOrCreatePeer(callId, userId)
     if (direction === 'send') peer.sendTransportId = transport.id
     else peer.recvTransportId = transport.id
 
@@ -184,9 +212,11 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async connectTransport(transportId: string, dtlsParameters: any): Promise<void> {
+  async connectTransport(transportId: string, userId: string, dtlsParameters: any): Promise<void> {
     const transport = this.transports.get(transportId)
     if (!transport) throw new Error(`Transport ${transportId} not found`)
+    const owner = this.transportOwners.get(transportId)
+    if (!owner || owner.userId !== userId) throw new Error('Not the owner of this transport')
     await transport.connect({ dtlsParameters })
   }
 
@@ -195,28 +225,43 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     if (!transport) return
     try { transport.close() } catch {}
     this.transports.delete(transportId)
+    this.transportOwners.delete(transportId)
   }
 
   // ── Producer lifecycle ──────────────────────────────────────────────────────
 
   async produce(callId: string, userId: string, transportId: string, kind: string, rtpParameters: any): Promise<any> {
+    const peer = this.getAuthorizedPeer(callId, userId)
+    if (!peer) throw new Error('Not an authorized participant of this call')
     const transport = this.transports.get(transportId)
     if (!transport) throw new Error(`Transport ${transportId} not found`)
+    const transportOwner = this.transportOwners.get(transportId)
+    if (!transportOwner || transportOwner.userId !== userId || transportOwner.callId !== callId) {
+      throw new Error('Not the owner of this transport')
+    }
 
     const producer = await transport.produce({ kind, rtpParameters })
     this.producers.set(producer.id, producer)
+    this.producerOwners.set(producer.id, { callId, userId })
 
-    const peer = this.getOrCreatePeer(callId, userId)
     peer.producers.set(producer.id, kind as 'audio' | 'video')
 
-    producer.on('transportclose', () => { this.producers.delete(producer.id) })
+    producer.on('transportclose', () => {
+      this.producers.delete(producer.id)
+      this.producerOwners.delete(producer.id)
+    })
 
     return { id: producer.id }
   }
 
   async closeProducer(callId: string, userId: string, producerId: string): Promise<void> {
+    const owner = this.producerOwners.get(producerId)
+    if (!owner || owner.userId !== userId || owner.callId !== callId) {
+      throw new Error('Not the owner of this producer')
+    }
     const producer = this.producers.get(producerId)
     if (producer) { try { producer.close() } catch {} this.producers.delete(producerId) }
+    this.producerOwners.delete(producerId)
     const room = this.rooms.get(callId)
     room?.peers.get(userId)?.producers.delete(producerId)
   }
@@ -230,10 +275,23 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     producerId: string,
     rtpCapabilities: any,
   ): Promise<any> {
+    const peer = this.getAuthorizedPeer(callId, consumingUserId)
+    if (!peer) throw new Error('Not an authorized participant of this call')
     const transport = this.transports.get(transportId)
     if (!transport) throw new Error(`Transport ${transportId} not found`)
+    const transportOwner = this.transportOwners.get(transportId)
+    if (!transportOwner || transportOwner.userId !== consumingUserId || transportOwner.callId !== callId) {
+      throw new Error('Not the owner of this transport')
+    }
     const producer = this.producers.get(producerId)
     if (!producer) throw new Error(`Producer ${producerId} not found`)
+    // The producer must belong to THIS SAME call - without this, a leaked or
+    // guessed producerId from an unrelated call would let an attacker
+    // consume that call's media despite being a legitimate peer elsewhere.
+    const producerOwner = this.producerOwners.get(producerId)
+    if (!producerOwner || producerOwner.callId !== callId) {
+      throw new Error('Producer does not belong to this call')
+    }
     if (!this.router.canConsume({ producerId, rtpCapabilities })) {
       throw new Error('Cannot consume — incompatible RTP capabilities')
     }
@@ -244,12 +302,18 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
       paused: true, // client must resume
     })
     this.consumers.set(consumer.id, consumer)
+    this.consumerOwners.set(consumer.id, { userId: consumingUserId })
 
-    const peer = this.getOrCreatePeer(callId, consumingUserId)
     peer.consumers.set(consumer.id, producerId)
 
-    consumer.on('transportclose', () => { this.consumers.delete(consumer.id) })
-    consumer.on('producerclose', () => { this.consumers.delete(consumer.id) })
+    consumer.on('transportclose', () => {
+      this.consumers.delete(consumer.id)
+      this.consumerOwners.delete(consumer.id)
+    })
+    consumer.on('producerclose', () => {
+      this.consumers.delete(consumer.id)
+      this.consumerOwners.delete(consumer.id)
+    })
 
     return {
       id: consumer.id,
@@ -261,9 +325,11 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async resumeConsumer(consumerId: string): Promise<void> {
+  async resumeConsumer(consumerId: string, userId: string): Promise<void> {
     const consumer = this.consumers.get(consumerId)
     if (!consumer) throw new Error(`Consumer ${consumerId} not found`)
+    const owner = this.consumerOwners.get(consumerId)
+    if (!owner || owner.userId !== userId) throw new Error('Not the owner of this consumer')
     await consumer.resume()
   }
 }

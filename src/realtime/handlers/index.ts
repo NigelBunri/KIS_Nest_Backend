@@ -65,5 +65,10 @@ export function registerRealtimeHandlers(
   registerDisappearingHandlers(server, socket, deps)
   registerPollHandlers(server, socket, deps)
   registerGroupHandlers(server, socket, deps)
-  registerSfuHandlers(server, socket, { sfuService: deps.sfuService, djangoConversationClient: deps.djangoConversationClient, rateLimitService: deps.rateLimitService })
+  registerSfuHandlers(server, socket, {
+    sfuService: deps.sfuService,
+    callsService: deps.callsService as any,
+    djangoConversationClient: deps.djangoConversationClient,
+    rateLimitService: deps.rateLimitService,
+  })
 }

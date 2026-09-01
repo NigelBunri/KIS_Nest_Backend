@@ -40,6 +40,10 @@ import { StorageModule } from '../../../storage/storage.module';
     RateLimitService,
     MessageRetentionCron,
   ],
-  exports: [MessagesService],
+  // DjangoConversationClient is exported alongside MessagesService so that
+  // any module pulling messages out of a conversation (e.g. FeedsModule's
+  // broadcast-from-channel) can enforce membership on the conversationId it
+  // is given, instead of trusting it unchecked.
+  exports: [MessagesService, DjangoConversationClient],
 })
 export class MessagesModule {}

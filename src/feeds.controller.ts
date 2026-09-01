@@ -21,6 +21,7 @@ import { BroadcastService } from './broadcast.service'
 import { BroadcastSourceType, BroadcastVertical } from './broadcast.types'
 import { FeedsService } from './feeds.service'
 import { MessagesService } from './chat/features/messages/messages.service'
+import { DjangoConversationClient } from './chat/integrations/django/django-conversation.client'
 import { HttpAuthGuard } from './auth/http-auth.guard'
 import { extractIdempotencyKey, getRequestPrincipal, resolveTenantId } from './request.helpers'
 
@@ -46,9 +47,11 @@ class BroadcastChannelMessageDto {
   @IsString()
   channelMessageId!: string
 
-  @IsOptional()
+  // Required (not optional) because it is now the membership-check anchor
+  // for broadcastFromChannel below - without it, listByIds() would fetch
+  // the message by _id alone across every conversation in the system.
   @IsString()
-  conversationId?: string
+  conversationId!: string
 
   @IsOptional()
   @IsString()
@@ -67,6 +70,7 @@ export class FeedsController {
     private readonly feedsService: FeedsService,
     private readonly broadcastService: BroadcastService,
     private readonly messagesService: MessagesService,
+    private readonly djangoConversationClient: DjangoConversationClient,
   ) {}
 
   @Get()
@@ -185,6 +189,16 @@ export class FeedsController {
     if (!principal?.userId) {
       throw new UnauthorizedException('missing principal')
     }
+    // Without this, any caller with the broadcast:write scope could pass an
+    // arbitrary conversationId/channelMessageId belonging to a conversation
+    // they aren't a member of and have its private content republished to
+    // the public feed - assertMember() throws (401/403) if they aren't a
+    // current, unblocked member of that conversation.
+    const token = (principal as unknown as { token?: string }).token
+    await this.djangoConversationClient.assertMember(
+      { userId: principal.userId, token: token ?? '' },
+      body.conversationId,
+    )
     const messages = await this.messagesService.listByIds({
       messageIds: [body.channelMessageId],
       conversationId: body.conversationId,

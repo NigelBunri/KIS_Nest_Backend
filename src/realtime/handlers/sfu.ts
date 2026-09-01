@@ -28,12 +28,20 @@ const logger = new Logger('SfuHandlers')
 
 export interface SfuDeps {
   sfuService: SfuService
+  // Narrow structural interface (matches the pattern used by CallsDeps in
+  // ./calls.ts) - only the one lookup this handler actually needs, so any
+  // object exposing getCall (including the real CallsService) satisfies it.
+  callsService: {
+    getCall(conversationId: string, callId: string): Promise<{
+      participants?: Array<{ userId: string; status: string }>
+    } | null>
+  }
   djangoConversationClient: RoomsDeps['djangoConversationClient']
   rateLimitService?: { assert(p: any, key: string, limit?: number): Promise<void> | void }
 }
 
 export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDeps) {
-  const { sfuService, djangoConversationClient, rateLimitService } = deps
+  const { sfuService, callsService, djangoConversationClient, rateLimitService } = deps
 
   // ── Join SFU room ──────────────────────────────────────────────────────────
   // Returns the router RTP capabilities. The client loads these into its Device.
@@ -49,11 +57,26 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
       await rateLimitService?.assert(principal, 'sfu:join', 10)
       await djangoConversationClient.assertMember(principal, conversationId)
 
+      // assertMember only proves the caller belongs to SOME conversation they
+      // named - it says nothing about whether callId is a real call that
+      // conversation is hosting, or whether this specific user is actually a
+      // participant of it. Without this check, any conversation member could
+      // supply an arbitrary/guessed callId from an unrelated call and the SFU
+      // would happily let them join it (see the CallSession record as the
+      // source of truth for call membership, same as the P2P call path).
+      const call = await callsService.getCall(conversationId, callId)
+      const isCallParticipant = !!call?.participants?.some(
+        (row: any) => String(row.userId) === String(principal.userId) && row.status !== 'rejected',
+      )
+      if (!call || !isCallParticipant) {
+        return safeAck(ack, err('Not a participant of this call', 'FORBIDDEN'))
+      }
+
       if (!sfuService.available) {
         return safeAck(ack, err('SFU not available — install mediasoup on the server', 'SFU_UNAVAILABLE'))
       }
 
-      sfuService.getOrCreatePeer(callId, principal.userId)
+      sfuService.authorizePeer(callId, principal.userId)
       socket.join(rooms.convRoom(conversationId))
 
       const routerRtpCapabilities = sfuService.getRtpCapabilities()
@@ -100,7 +123,7 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
 
     try {
       await rateLimitService?.assert(principal, 'sfu:transport', 20)
-      await sfuService.connectTransport(transportId, dtlsParameters)
+      await sfuService.connectTransport(transportId, principal.userId, dtlsParameters)
       safeAck(ack, ok({ connected: true }))
     } catch (e: any) {
       logger.error(`[sfu] sfu.transport.connect failed`, e?.message)
@@ -167,7 +190,7 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
     if (!consumerId) return safeAck(ack, err('consumerId required', 'BAD_REQUEST'))
 
     try {
-      await sfuService.resumeConsumer(consumerId)
+      await sfuService.resumeConsumer(consumerId, principal.userId)
       safeAck(ack, ok({ resumed: true }))
     } catch (e: any) {
       logger.error(`[sfu] sfu.consumer.resume failed`, e?.message)

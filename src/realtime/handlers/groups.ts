@@ -25,7 +25,13 @@ export interface GroupsDeps {
     removeDevice(deviceId: string, token: string): Promise<{ removed: boolean }>
   }
   threadsService: {
-    renameThread(args: { threadId: string; title: string; requestedByUserId: string }): Promise<{
+    getThreadConversationId(threadId: string): Promise<string | null>
+    renameThread(args: {
+      threadId: string
+      conversationId: string
+      title: string
+      requestedByUserId: string
+    }): Promise<{
       id: string
       conversationId: string
       title: string
@@ -55,8 +61,19 @@ export function registerGroupHandlers(server: Server, socket: Socket, deps: Grou
     try {
       await deps.rateLimitService.assert(principal, `subroom_rename:${subroomId}`, 20)
 
+      const conversationId = await deps.threadsService.getThreadConversationId(subroomId)
+      if (!conversationId) {
+        return safeAck(ack, err(`Thread ${subroomId} not found`, 'NOT_FOUND'))
+      }
+      // A thread's title is conversation-scoped content - without this check
+      // any connected socket user could rename any thread in the system by
+      // guessing/reusing a leaked subroomId, regardless of whether they
+      // belong to that thread's conversation at all.
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+
       const updated = await deps.threadsService.renameThread({
         threadId: subroomId,
+        conversationId,
         title,
         requestedByUserId: principal.userId,
       })
