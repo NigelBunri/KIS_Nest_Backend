@@ -9,6 +9,32 @@ import { SendMessageDto } from './messages.dto'
 import type { SendMessagePayload, EditMessagePayload } from '../../chat.types'
 import { UploadIntent, UploadIntentDocument } from '../../../uploads/schemas/upload-intent.schema'
 
+// Shared by every path that actually scrubs a message's content (as
+// opposed to deleteMessageLegacy's user-initiated delete-for-everyone,
+// which only ever flips isDeleted/deleteState and leaves these fields in
+// place - see purgeExpiredDeletedMessageContent's docstring for why that
+// distinction matters for retention).
+const MESSAGE_CONTENT_FIELDS_UNSET = {
+  text: '',
+  styledText: '',
+  voice: '',
+  sticker: '',
+  attachments: '',
+  media: '',
+  contacts: '',
+  poll: '',
+  event: '',
+  location: '',
+  bibleVerse: '',
+  linkPreview: '',
+  previewText: '',
+  ciphertext: '',
+  encryptionMeta: '',
+  iv: '',
+  tag: '',
+  aad: '',
+} as const
+
 @Injectable()
 export class MessagesService {
   constructor(
@@ -348,26 +374,7 @@ export class MessagesService {
         deletedAt: nowMs,
         deletedBy: userId,
       },
-      $unset: {
-        text: '',
-        styledText: '',
-        voice: '',
-        sticker: '',
-        attachments: '',
-        media: '',
-        contacts: '',
-        poll: '',
-        event: '',
-        location: '',
-        bibleVerse: '',
-        linkPreview: '',
-        previewText: '',
-        ciphertext: '',
-        encryptionMeta: '',
-        iv: '',
-        tag: '',
-        aad: '',
-      },
+      $unset: MESSAGE_CONTENT_FIELDS_UNSET,
     })
 
     return {
@@ -400,29 +407,37 @@ export class MessagesService {
           deletedAt: nowMs,
           deletedBy: 'moderation',
         },
-        $unset: {
-          text: '',
-          styledText: '',
-          voice: '',
-          sticker: '',
-          attachments: '',
-          media: '',
-          contacts: '',
-          poll: '',
-          event: '',
-          location: '',
-          bibleVerse: '',
-          linkPreview: '',
-          previewText: '',
-          ciphertext: '',
-          encryptionMeta: '',
-          iv: '',
-          tag: '',
-          aad: '',
-        },
+        $unset: MESSAGE_CONTENT_FIELDS_UNSET,
       },
     )
     return { found: (result.matchedCount ?? 0) > 0 }
+  }
+
+  /**
+   * Retention sweep (see message-retention.cron.ts, daily): a user's own
+   * deleteMessageLegacy "delete for everyone" only ever flips isDeleted/
+   * deleteState - it deliberately leaves the content fields in place so
+   * deleteMessageLegacy itself stays simple and fast on the hot path, but
+   * that means a "deleted" message's real content (including E2EE
+   * ciphertext) has sat in Mongo forever, hidden from clients but not
+   * actually gone. This scrubs content from any message that has been in
+   * that state for longer than the retention window - the same
+   * $unset purgeMessagesForUser/moderatorDeleteMessage already apply
+   * immediately for account-deletion and staff takedowns, just applied
+   * later for an ordinary user-initiated delete.
+   */
+  async scrubContentForMessagesDeletedBefore(cutoffMs: number): Promise<{ scrubbed: number }> {
+    // No "already scrubbed" pre-filter on which content fields exist -
+    // different message kinds (voice/attachment/sticker/poll/...) never
+    // had `text` set to begin with, so filtering on it would wrongly skip
+    // sweeping those forever rather than just once. $unset on fields that
+    // are already absent is a safe Mongo no-op, so an already-scrubbed row
+    // simply contributes 0 to modifiedCount instead of being excluded.
+    const result = await this.messageModel.updateMany(
+      { isDeleted: true, deletedAt: { $lt: cutoffMs } },
+      { $unset: MESSAGE_CONTENT_FIELDS_UNSET },
+    )
+    return { scrubbed: result.modifiedCount ?? 0 }
   }
 
   /**

@@ -2,9 +2,11 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { HttpModule } from '@nestjs/axios';
+import { ScheduleModule } from '@nestjs/schedule';
 import { MessagesService } from './messages.service';
 import { MessagesController } from './messages.controller';
 import { VoicePlaybackService } from './voice-playback.service';
+import { MessageRetentionCron } from './message-retention.cron';
 import { Message, MessageSchema } from './schemas/message.schema';
 import { UploadIntent, UploadIntentSchema } from '../../../uploads/schemas/upload-intent.schema';
 import { AuthModule } from '../../../auth/auth.module';
@@ -22,6 +24,7 @@ import { StorageModule } from '../../../storage/storage.module';
     HttpModule,
     ObservabilityModule,
     StorageModule,
+    ScheduleModule.forRoot(),
     MongooseModule.forFeature([
       { name: Message.name, schema: MessageSchema },
       { name: UploadIntent.name, schema: UploadIntentSchema },
@@ -35,6 +38,7 @@ import { StorageModule } from '../../../storage/storage.module';
     DjangoConversationClient,
     DjangoMediaClient,
     RateLimitService,
+    MessageRetentionCron,
   ],
   exports: [MessagesService],
 })
