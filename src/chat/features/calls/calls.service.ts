@@ -259,9 +259,15 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     }
 
     // If another call is active for this conversation, auto-end it when it is
-    // stale (> 5 min old) — handles the case where call.end was never received
-    // by the server due to a network drop.
-    const staleThresholdMs = 5 * 60 * 1000
+    // stale — handles the case where call.end was never received by the
+    // server due to a network drop, an app kill, or a recipient whose call
+    // never surfaced while backgrounded. The client itself auto-ends an
+    // unanswered outgoing call after ~45s (see startCall's ring timeout in
+    // SocketProvider.tsx), so this is a fallback for when that message
+    // never arrives — it used to be 5 minutes, which meant every retry to
+    // the same conversation was flatly rejected with CALL_ALREADY_ACTIVE for
+    // up to 5 minutes after a single call that nobody answered.
+    const staleThresholdMs = 60 * 1000
     const existingActive = await this.calls
       .findOne({ conversationId: args.conversationId, isActiveInConversation: true })
       .lean()
