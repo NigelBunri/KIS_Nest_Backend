@@ -79,10 +79,14 @@ export class NotificationsService implements OnModuleInit {
       return { ok: true, delivered: 0, userId: target.userId };
     }
 
+    // callId is only present on incoming-call/missed-call pushes — logging
+    // it when available lets a specific call's push delivery be traced
+    // end-to-end alongside the client-side diagnostics (callDiagnostics.ts).
+    const callIdSuffix = msg.data?.callId ? ` callId=${msg.data.callId}` : ''
     const res = await this.provider.send(tokenList, msg);
     this.logger.log(
       `[notify] sent to userId=${target.userId}: tokens=${tokenList.length} delivered=${res.delivered} ` +
-      `permanentFailures=${res.failedTokens?.length ?? 0} transientFailures=${res.transientTokens?.length ?? 0}`,
+      `permanentFailures=${res.failedTokens?.length ?? 0} transientFailures=${res.transientTokens?.length ?? 0}${callIdSuffix}`,
     );
 
     // Prune permanently-invalid tokens returned by the provider
@@ -104,7 +108,7 @@ export class NotificationsService implements OnModuleInit {
       });
       if (retryRes) {
         this.logger.log(
-          `[notify] retry for userId=${target.userId}: delivered=${retryRes.delivered} stillFailed=${retryRes.transientTokens?.length ?? 0}`,
+          `[notify] retry for userId=${target.userId}: delivered=${retryRes.delivered} stillFailed=${retryRes.transientTokens?.length ?? 0}${callIdSuffix}`,
         );
         if (retryRes.failedTokens?.length) {
           await this.tokens.bulkDeactivate(retryRes.failedTokens).catch(() => null);
