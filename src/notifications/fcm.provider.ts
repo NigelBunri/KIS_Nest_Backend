@@ -91,11 +91,19 @@ class FcmPushProvider implements PushProvider {
 
     const res = await this.admin.messaging().sendEachForMulticast(payload)
     const delivered = res.responses.filter((r) => r.success).length
-    const failedTokens = res.responses
+    const failedResponses = res.responses
       .map((r, i) => ({ r, token: tokens[i] }))
-      .filter(({ r }) => !r.success && r.error && STALE_ERROR_CODES.has(r.error.code))
+      .filter(({ r }) => !r.success)
+    // Permanently invalid — deactivate, never retry.
+    const failedTokens = failedResponses
+      .filter(({ r }) => r.error && STALE_ERROR_CODES.has(r.error.code))
       .map(({ token }) => token)
-    return { delivered, failedTokens }
+    // Everything else that failed (rate limit, transient 5xx, unknown) —
+    // may succeed on a retry; the token itself isn't necessarily bad.
+    const transientTokens = failedResponses
+      .filter(({ r }) => !(r.error && STALE_ERROR_CODES.has(r.error.code)))
+      .map(({ token }) => token)
+    return { delivered, failedTokens, transientTokens }
   }
 }
 

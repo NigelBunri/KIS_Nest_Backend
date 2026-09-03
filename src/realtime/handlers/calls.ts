@@ -348,7 +348,22 @@ function createCallHandler(
           if (currentJoined >= cap) {
             return safeAck(ack, err(`Call is full (max ${cap} participants)`, 'CALL_FULL'))
           }
-          const activatedCall = await deps.callsService.markActive?.(conversationId, callId)
+          // markActive returns null only for a call that's already terminal
+          // (ended/missed) — e.g. the ring timeout/reaper closed it out
+          // before this answer, delayed by a slow push or a reconnect,
+          // finally arrived. The backend's CallSession is authoritative:
+          // reject the stale answer here rather than letting the client
+          // believe it successfully joined a call that no longer exists.
+          // Guarded by `deps.callsService.markActive` (not just its result)
+          // so test doubles / older deps that don't implement this optional
+          // method at all keep working exactly as before — only a REAL
+          // markActive call returning null counts as "stale".
+          const activatedCall = deps.callsService.markActive
+            ? await deps.callsService.markActive(conversationId, callId)
+            : undefined
+          if (deps.callsService.markActive && !activatedCall) {
+            return safeAck(ack, err('This call is no longer active', 'CALL_ENDED'))
+          }
           await deps.callsService.setParticipantStatus?.(
             conversationId,
             callId,

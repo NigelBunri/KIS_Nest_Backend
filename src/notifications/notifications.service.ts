@@ -50,7 +50,12 @@ export class NotificationsService implements OnModuleInit {
 
   onModuleInit() {
     if (this.provider instanceof DummyPushProvider) {
-      this.logger.warn('Running with DummyPushProvider - no push notifications will be delivered.');
+      // error, not warn: this is a production-severity condition (every
+      // push, including every incoming-call wake-up, silently no-ops) that
+      // must not blend into routine warning-level log noise. Also surfaced
+      // non-secretly via getProviderStatus()/the /health endpoint so it's
+      // checkable without grepping logs.
+      this.logger.error('Running with DummyPushProvider - no push notifications will be delivered. Check FCM_SERVICE_ACCOUNT_JSON/FCM_SERVICE_ACCOUNT_PATH.');
     }
   }
 
@@ -64,7 +69,7 @@ export class NotificationsService implements OnModuleInit {
     };
   }
 
-  async notify(target: PushTarget, msg: PushMessage) {
+  async notify(target: PushTarget, msg: PushMessage, opts?: { retryOnTransientFailure?: boolean }) {
     const tokenList = target.deviceTokens?.length
       ? target.deviceTokens
       : await this.tokens.listActiveTokens(target.userId);
@@ -76,12 +81,36 @@ export class NotificationsService implements OnModuleInit {
 
     const res = await this.provider.send(tokenList, msg);
     this.logger.log(
-      `[notify] sent to userId=${target.userId}: tokens=${tokenList.length} delivered=${res.delivered} failedTokens=${res.failedTokens?.length ?? 0}`,
+      `[notify] sent to userId=${target.userId}: tokens=${tokenList.length} delivered=${res.delivered} ` +
+      `permanentFailures=${res.failedTokens?.length ?? 0} transientFailures=${res.transientTokens?.length ?? 0}`,
     );
 
     // Prune permanently-invalid tokens returned by the provider
     if (res.failedTokens?.length) {
       await this.tokens.bulkDeactivate(res.failedTokens).catch(() => null);
+    }
+
+    // Bounded single retry, only for time-critical pushes (incoming calls)
+    // that got NO delivery at all and failed for a non-permanent reason —
+    // e.g. FCM having a transient blip, a rate limit, an unrecognized
+    // error code. Never retried more than once, never for tokens already
+    // known permanently invalid, so a bad FCM day degrades gracefully
+    // instead of turning into a retry storm.
+    if (opts?.retryOnTransientFailure && res.delivered === 0 && res.transientTokens?.length) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const retryRes = await this.provider.send(res.transientTokens, msg).catch((e: any) => {
+        this.logger.warn(`[notify] retry attempt itself failed userId=${target.userId}: ${e?.message}`);
+        return null;
+      });
+      if (retryRes) {
+        this.logger.log(
+          `[notify] retry for userId=${target.userId}: delivered=${retryRes.delivered} stillFailed=${retryRes.transientTokens?.length ?? 0}`,
+        );
+        if (retryRes.failedTokens?.length) {
+          await this.tokens.bulkDeactivate(retryRes.failedTokens).catch(() => null);
+        }
+        return { ok: true, delivered: res.delivered + retryRes.delivered, userId: target.userId };
+      }
     }
 
     return { ok: true, delivered: res.delivered, userId: target.userId };
@@ -133,7 +162,10 @@ export class NotificationsService implements OnModuleInit {
     }
 
     // Also always send a regular FCM push - covers Android, and any iOS
-    // device that hasn't registered a VoIP token yet.
+    // device that hasn't registered a VoIP token yet. Incoming-call pushes
+    // are the most time-critical/highest-stakes push type in the app (a
+    // dropped one is a call that never rings), so this is the one place
+    // that opts into the bounded transient-failure retry.
     return this.notify(
       { userId: input.toUserId },
       {
@@ -147,6 +179,7 @@ export class NotificationsService implements OnModuleInit {
           type: 'incoming_call',
         },
       },
+      { retryOnTransientFailure: true },
     );
   }
 

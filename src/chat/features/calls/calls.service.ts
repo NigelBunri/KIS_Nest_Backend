@@ -41,6 +41,28 @@ type NotificationsServiceRef = {
   }): Promise<any>
 }
 
+// ─── Call state machine ──────────────────────────────────────────────────
+//
+// Authoritative states a CallSession.status can hold, and the only
+// transitions allowed between them. Every write below that changes
+// `status` is expressed as an atomic Mongo query that only matches
+// documents currently in an allowed "from" state — never a read-then-write
+// — so two concurrent requests (e.g. a duplicate call.answer, or a
+// call.end racing the stale-ringing reaper) can't both succeed and leave
+// the record in an inconsistent state.
+//
+//   pending → ringing | missed | ended
+//   ringing → active | missed | ended
+//   active  → ended
+//   missed  → (terminal)
+//   ended   → (terminal)
+//
+// In particular: an `active` call (someone actually answered) is NEVER
+// auto-ended by age alone, only by every participant actually leaving
+// (cleanupStaleCalls, participant-aware) or an explicit call.end. This was
+// previously violated — see createCallOrThrowIfActiveInConversation below.
+const RINGING_STALE_MS = 90 * 1000 // matches cleanupStaleCalls' ringingCutoff
+
 @Injectable()
 export class CallsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CallsService.name)
@@ -251,6 +273,19 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       .findOne({ conversationId: args.conversationId, callId: args.callId })
       .lean()
     if (existingById) {
+      // A terminal call (already ended/missed) must never be resurrected by
+      // a late/duplicate call.offer — e.g. a queued socket emit that only
+      // gets flushed after a reconnect, well after the reaper or an
+      // explicit call.end already closed it out. Rejecting here (rather
+      // than the old behavior of returning it as "reused") stops the
+      // handler from re-broadcasting call.offer/pushing invitees for a call
+      // that's genuinely over.
+      if (existingById.status === 'ended' || existingById.status === 'missed') {
+        this.logger.debug(
+          `[calls] createCall rejected: callId=${args.callId} already terminal (${existingById.status})`,
+        )
+        throw new Error('CALL_ALREADY_ENDED')
+      }
       this.logger.debug(`[calls] createCall idempotent return callId=${args.callId}`)
       // __reused tells the caller this call.offer was already processed once —
       // e.g. a client resent it after a socket reconnect — so it must not
@@ -258,32 +293,43 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       return { ...(existingById as CallSession), __reused: true }
     }
 
-    // If another call is active for this conversation, auto-end it when it is
-    // stale — handles the case where call.end was never received by the
-    // server due to a network drop, an app kill, or a recipient whose call
-    // never surfaced while backgrounded. The client itself auto-ends an
-    // unanswered outgoing call after ~45s (see startCall's ring timeout in
-    // SocketProvider.tsx), so this is a fallback for when that message
-    // never arrives — it used to be 5 minutes, which meant every retry to
-    // the same conversation was flatly rejected with CALL_ALREADY_ACTIVE for
-    // up to 5 minutes after a single call that nobody answered.
-    const staleThresholdMs = 60 * 1000
+    // If another call is active for this conversation, only a still-RINGING
+    // one that's been unanswered past the ring window is eligible for
+    // auto-cleanup — matching cleanupStaleCalls' own ringingCutoff. This
+    // handles call.end never arriving (network drop, app kill, a recipient
+    // whose call never surfaced while backgrounded).
+    //
+    // CRITICAL: an `active` call (someone actually answered) must NEVER be
+    // auto-ended by age alone — a real, ongoing call is very commonly older
+    // than any short ring-timeout. A prior version of this check used a
+    // flat age threshold regardless of status, which meant a duplicate/
+    // stray call.offer arriving mid-conversation could silently end a
+    // call two people were actively talking on. Only call.end, call.leave,
+    // or cleanupStaleCalls' participant-aware reaper (which checks who's
+    // actually still joined, not just elapsed time) may end an active call.
     const existingActive = await this.calls
       .findOne({ conversationId: args.conversationId, isActiveInConversation: true })
       .lean()
     if (existingActive) {
       const ageMs = Date.now() - new Date(existingActive.startedAt).getTime()
-      if (ageMs > staleThresholdMs) {
-        this.logger.warn(
-          `[calls] auto-ending stale active call callId=${existingActive.callId} ageMs=${ageMs}`,
-        )
-        await this.calls.updateOne(
-          { conversationId: args.conversationId, callId: existingActive.callId },
-          { $set: { status: 'ended', endedAt: new Date(), isActiveInConversation: false } },
-        )
-      } else {
+      const staleRinging = existingActive.status === 'ringing' && ageMs > RINGING_STALE_MS
+      if (!staleRinging) {
         throw new Error('CALL_ALREADY_ACTIVE')
       }
+      // Atomic: only flip it if it's STILL 'ringing' at write time. If it
+      // was answered in the race window between our read and this update,
+      // modifiedCount is 0 and we correctly fall through to
+      // CALL_ALREADY_ACTIVE instead of clobbering a call that just connected.
+      const result = await this.calls.updateOne(
+        { conversationId: args.conversationId, callId: existingActive.callId, status: 'ringing' },
+        { $set: { status: 'missed', endedAt: new Date(), isActiveInConversation: false } },
+      )
+      if (!result.modifiedCount) {
+        throw new Error('CALL_ALREADY_ACTIVE')
+      }
+      this.logger.warn(
+        `[calls] auto-missed stale ringing call callId=${existingActive.callId} ageMs=${ageMs}`,
+      )
     }
 
     const now = new Date()
@@ -347,10 +393,22 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     return this.calls.findOne({ conversationId, callId }).lean()
   }
 
+  /**
+   * Atomically mark a call active, but ONLY if it isn't already terminal.
+   *
+   * Matches status 'ringing' (the normal first-answer transition) OR
+   * already 'active' (a later participant joining an in-progress group
+   * call) — both are legitimate. Returns null for 'ended'/'missed'/
+   * nonexistent, which the caller (call.answer handler) must treat as a
+   * STALE ANSWER and reject outright: without this, a late call.answer for
+   * a call the server already closed out (e.g. the ring timeout fired
+   * before a delayed push finally reached the callee) would still be
+   * accepted client-side, since nothing previously checked this result.
+   */
   async markActive(conversationId: string, callId: string): Promise<CallSession | null> {
     return this.calls
       .findOneAndUpdate(
-        { conversationId, callId, status: 'ringing' },
+        { conversationId, callId, status: { $in: ['ringing', 'active'] } },
         { $set: { status: 'active' } },
         { new: true },
       )
