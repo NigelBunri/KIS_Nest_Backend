@@ -149,8 +149,19 @@ export class AttachmentAccessService {
     const mimeType = attachment.mimeType || meta.contentType || 'application/octet-stream';
     const size = typeof attachment.size === 'number' ? attachment.size : meta.size;
 
+    // A presigned S3 URL can't be revoked once issued - it stays valid for
+    // its own TTL regardless of what happens to `attachment.viewedAt`
+    // afterward (assertNotExpiredOrConsumed above only gates issuing a NEW
+    // one). For a view-once attachment that's a real leak: the recipient's
+    // client (or anyone who intercepts the URL) can re-fetch the raw file
+    // within that window even after the view-once flag marks it consumed.
+    // Force those through the authenticated /stream proxy instead, which
+    // re-runs this exact consumption check on every actual byte-serving
+    // request rather than only when a URL is first issued - the same
+    // protection the local-storage driver already gets by construction.
+    // Ordinary (non-view-once) attachments keep the cheaper direct-S3 path.
     const downloadUrl =
-      this.storage.driver() === 's3'
+      this.storage.driver() === 's3' && !attachment.viewOnce
         ? await this.storage.generatePresignedGet(storageKey, DOWNLOAD_URL_TTL_SECONDS, originalName)
         : this.localStreamPath(attachmentId, origin);
 
