@@ -179,6 +179,40 @@ describe('AttachmentAccessService.resolveForDownloadUrl', () => {
     expect(result.downloadUrl).toBe('https://api.example.com/uploads/att-uuid-1/stream')
     expect(storage.generatePresignedGet).not.toHaveBeenCalled()
   })
+
+  // A presigned S3 URL can't be revoked once issued - it stays independently
+  // fetchable for its own TTL no matter what happens to `viewedAt`
+  // afterward. Security fix: an unviewed view-once attachment on S3 must be
+  // forced through the same authenticated /stream proxy the local driver
+  // already uses, which re-checks consumption on every actual byte-serving
+  // request instead of only when a URL is first issued.
+  it('forces an unviewed view-once attachment through the stream proxy even on S3', async () => {
+    const storage = makeStorage() // driver: () => 's3'
+    const message = {
+      ...baseMessage,
+      attachments: [{ ...baseAttachment, viewOnce: true }], // not yet viewed
+    }
+    const service = new AttachmentAccessService(makeMessageModel(message), storage, makeDjango())
+
+    const result = await service.resolveForDownloadUrl('att-uuid-1', principal, 'https://api.example.com')
+
+    expect(result.downloadUrl).toBe('https://api.example.com/uploads/att-uuid-1/stream')
+    expect(storage.generatePresignedGet).not.toHaveBeenCalled()
+  })
+
+  it('still returns a direct presigned S3 URL for a non-view-once attachment', async () => {
+    const storage = makeStorage()
+    const message = {
+      ...baseMessage,
+      attachments: [{ ...baseAttachment, viewOnce: false }],
+    }
+    const service = new AttachmentAccessService(makeMessageModel(message), storage, makeDjango())
+
+    const result = await service.resolveForDownloadUrl('att-uuid-1', principal, 'https://api.example.com')
+
+    expect(result.downloadUrl).toBe('https://s3.example.com/signed?sig=abc')
+    expect(storage.generatePresignedGet).toHaveBeenCalled()
+  })
 })
 
 describe('AttachmentAccessService.resolveForLegacyKeyDownload', () => {
