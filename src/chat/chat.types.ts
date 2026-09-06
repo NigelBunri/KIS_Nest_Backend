@@ -120,6 +120,13 @@ export const EVT = {
   // Participant silently leaves without ending the call for others
   CALL_LEAVE: 'call.leave',
 
+  // Callee → server → caller: the callee's device has actually processed
+  // the offer and is alerting the user (in-app ring screen mounted, native
+  // CallKit/ConnectionService UI shown where available) — distinguishes
+  // "ringing" from "dialing" (caller has sent the offer but nothing is
+  // confirmed to have reached/alerted the other side yet).
+  CALL_RINGING: 'call.ringing',
+
   // calls — WebRTC peer-to-peer media negotiation (targeted relay)
   CALL_SDP_OFFER: 'call.sdp.offer',
   CALL_SDP_ANSWER: 'call.sdp.answer',

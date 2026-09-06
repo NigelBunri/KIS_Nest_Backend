@@ -779,6 +779,42 @@ function registerSocialHandlers(server: Server, socket: Socket, deps: CallsDeps)
     }
   })
 
+  // call.ringing — callee reports back that their device is actually
+  // alerting the user (in-app ring screen mounted, and/or native CallKit/
+  // ConnectionService UI shown). Relayed ONLY to the call's creator, the
+  // same targeted-at-the-caller pattern call.answer uses just above (not a
+  // convRoom broadcast — the caller may not have joined the conv room yet at
+  // this point, and this is meaningful to them specifically, not to anyone
+  // else who might be subscribed to the conversation).
+  socket.on(EVT.CALL_RINGING, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const v = await validateSocketPayload(CallHandDto, payload)
+    if (!v.ok) return safeAck(ack, err(v.errors.join('; '), 'BAD_REQUEST'))
+
+    const { conversationId, callId } = v.value
+    try {
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
+
+      const creator = await deps.callsService?.getCallCreator?.(conversationId, callId).catch(() => null)
+      // Silently no-op rather than error if there's no creator to notify —
+      // this is a best-effort UX signal (a "Ringing…" label), never something
+      // that should fail the call for either side if the lookup misses (a
+      // stale/already-ended call, or one predating getCallCreator's data).
+      if (creator && creator !== principal.userId) {
+        safeEmit(server, rooms.userRoom(creator), EVT.CALL_RINGING, {
+          conversationId,
+          callId,
+          fromUserId: principal.userId,
+          ringingAt: new Date().toISOString(),
+        })
+      }
+      safeAck(ack, ok({ delivered: true }))
+    } catch (error: any) {
+      logger.error(`[calls] call.ringing failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Ringing signal failed', 'ERROR'))
+    }
+  })
+
   // call.reaction — emoji reaction (broadcast to conv)
   socket.on(EVT.CALL_REACTION, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
