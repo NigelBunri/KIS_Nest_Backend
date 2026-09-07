@@ -120,6 +120,49 @@ export interface CallsDeps {
   }
 }
 
+// Thrown by assertCallHost below and caught by each handler's own
+// try/catch (same as assertMember's UnauthorizedException) - lets host-only
+// handlers compose this into their existing error handling with one line.
+class CallHostForbiddenError extends Error {}
+
+// Every "host-only" call-control handler (knock admit/deny, promote,
+// mute/remove participant, recording start/stop, RTMP start/stop, breakout
+// create) needs exactly this check, and every one of them had drifted from
+// the pattern in a way that was actually exploitable:
+//
+//   if (creator && creator !== principal.userId) { forbidden }
+//
+// getCallCreator() returns null for a callId that doesn't match any real
+// call (a fabricated id, a typo, a stale/already-ended call) - and a null
+// creator makes `creator && ...` short-circuit to false, so the check
+// PASSES instead of failing. Combined with several of these handlers never
+// calling assertMember either, this let any authenticated user "host" a
+// call that doesn't exist in a conversation they don't belong to, and have
+// the handler's side effects (forcing a target user's socket into that
+// conversation's room, broadcasting spoofed recording/RTMP/role-change
+// events into it) still go through.
+//
+// This helper closes both gaps at once: it always requires real
+// conversation membership first (a legitimate host is necessarily a member
+// of the conversation their call lives in, so this never rejects a real
+// host), then treats "no such call" as forbidden, not permitted, exactly
+// like "wrong host" is. Throws CallHostForbiddenError on failure so callers
+// can catch it and reuse their own error-shaped ack response.
+async function assertCallHost(
+  deps: CallsDeps,
+  conversationId: string,
+  callId: string,
+  principal: SocketPrincipal,
+): Promise<void> {
+  await deps.djangoConversationClient.assertMember(principal, conversationId)
+  const creator = deps.callsService?.getCallCreator
+    ? await deps.callsService.getCallCreator(conversationId, callId)
+    : null
+  if (!creator || creator !== principal.userId) {
+    throw new CallHostForbiddenError('Only the call host can perform this action')
+  }
+}
+
 // ─── Legacy signaling (call.offer / call.answer / call.ice / call.end) ───────
 
 // Persist a call_event chat message so the call appears inline in the chat
@@ -878,15 +921,8 @@ function registerHostHandlers(server: Server, socket: Socket, deps: CallsDeps) {
     const { conversationId, callId, targetUserId } = v.value
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
-
-      // Verify the requester is the call creator (host)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) {
-          return safeAck(ack, err('Only the call host can mute participants', 'FORBIDDEN'))
-        }
-      }
+      // assertCallHost() already includes the assertMember check above.
+      await assertCallHost(deps, conversationId, callId, principal)
 
       // Broadcast mute to entire conv room — each client enforces locally
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_PARTICIPANT_MUTED, {
@@ -912,15 +948,8 @@ function registerHostHandlers(server: Server, socket: Socket, deps: CallsDeps) {
     const { conversationId, callId, targetUserId } = v.value
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
-
-      // Verify the requester is the call creator (host)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) {
-          return safeAck(ack, err('Only the call host can remove participants', 'FORBIDDEN'))
-        }
-      }
+      // assertCallHost() already includes the assertMember check above.
+      await assertCallHost(deps, conversationId, callId, principal)
 
       const removedAt = new Date().toISOString()
 
@@ -1104,6 +1133,11 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
 
     try {
       await deps.rateLimitService?.assert(principal, 'call:knock', 5)
+      // Unlike every other handler in this function, this one had no
+      // membership check at all - any authenticated user (not just a
+      // conversation member) could broadcast into an arbitrary
+      // conversation's room via this event.
+      await deps.djangoConversationClient.assertMember(principal, conversationId)
       await deps.callsService?.addKnocker?.(conversationId, callId, principal.userId)
 
       // Broadcast knock request to all conv participants so the host sees it
@@ -1135,12 +1169,7 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
 
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) {
-          return safeAck(ack, err('Only the call host can admit participants', 'FORBIDDEN'))
-        }
-      }
+      await assertCallHost(deps, conversationId, callId, principal)
 
       await deps.callsService?.removeKnocker?.(conversationId, callId, targetUserId)
       await deps.callsService?.setParticipantStatus?.(conversationId, callId, targetUserId, 'invited')
@@ -1176,12 +1205,7 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
 
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) {
-          return safeAck(ack, err('Only the call host can deny participants', 'FORBIDDEN'))
-        }
-      }
+      await assertCallHost(deps, conversationId, callId, principal)
 
       await deps.callsService?.removeKnocker?.(conversationId, callId, targetUserId)
 
@@ -1219,12 +1243,7 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
 
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) {
-          return safeAck(ack, err('Only the call host can change roles', 'FORBIDDEN'))
-        }
-      }
+      await assertCallHost(deps, conversationId, callId, principal)
 
       await deps.callsService?.setParticipantRole?.(
         conversationId,
@@ -1253,14 +1272,6 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
 // ─── Recording ───────────────────────────────────────────────────────────────
 
 function registerRecordingHandlers(server: Server, socket: Socket, deps: CallsDeps) {
-  const hostOnly = async (conversationId: string, callId: string, principal: SocketPrincipal): Promise<boolean> => {
-    if (deps.callsService?.getCallCreator) {
-      const creator = await deps.callsService.getCallCreator(conversationId, callId)
-      if (creator && creator !== principal.userId) return false
-    }
-    return true
-  }
-
   socket.on(EVT.CALL_RECORDING_START, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
     const principal = getPrincipal(socket)
     const p = payload as Record<string, unknown> ?? {}
@@ -1269,7 +1280,7 @@ function registerRecordingHandlers(server: Server, socket: Socket, deps: CallsDe
     if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (!(await hostOnly(conversationId, callId, principal))) return safeAck(ack, err('Host only', 'FORBIDDEN'))
+      await assertCallHost(deps, conversationId, callId, principal)
       await deps.callsService?.setRecordingState?.(conversationId, callId, 'recording')
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_RECORDING_CHANGED, {
         conversationId, callId, recordingState: 'recording', changedAt: new Date().toISOString(),
@@ -1286,7 +1297,7 @@ function registerRecordingHandlers(server: Server, socket: Socket, deps: CallsDe
     if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (!(await hostOnly(conversationId, callId, principal))) return safeAck(ack, err('Host only', 'FORBIDDEN'))
+      await assertCallHost(deps, conversationId, callId, principal)
       await deps.callsService?.setRecordingState?.(conversationId, callId, 'stopped')
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_RECORDING_CHANGED, {
         conversationId, callId, recordingState: 'stopped', changedAt: new Date().toISOString(),
@@ -1464,10 +1475,7 @@ function registerBreakoutHandlers(server: Server, socket: Socket, deps: CallsDep
     if (!conversationId || !callId || !rooms_?.length) return safeAck(ack, err('required fields missing', 'BAD_REQUEST'))
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) return safeAck(ack, err('Host only', 'FORBIDDEN'))
-      }
+      await assertCallHost(deps, conversationId, callId, principal)
       const breakoutRooms = rooms_.map((r, i) => ({
         roomId: `${callId}_br_${i + 1}`,
         name: r.name || `Room ${i + 1}`,
@@ -1531,10 +1539,7 @@ function registerRtmpHandlers(server: Server, socket: Socket, deps: CallsDeps) {
     if (!conversationId || !callId || !rtmpUrl) return safeAck(ack, err('conversationId, callId, rtmpUrl required', 'BAD_REQUEST'))
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) return safeAck(ack, err('Host only', 'FORBIDDEN'))
-      }
+      await assertCallHost(deps, conversationId, callId, principal)
       await deps.callsService?.setRtmp?.(conversationId, callId, true, rtmpUrl)
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_RTMP_CHANGED, {
         conversationId, callId, rtmpActive: true, rtmpUrl, changedAt: new Date().toISOString(),
@@ -1551,11 +1556,8 @@ function registerRtmpHandlers(server: Server, socket: Socket, deps: CallsDeps) {
     if (!conversationId || !callId) return safeAck(ack, err('required fields missing', 'BAD_REQUEST'))
     try {
       await deps.rateLimitService?.assert(principal, 'call:host', 60)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
-      if (deps.callsService?.getCallCreator) {
-        const creator = await deps.callsService.getCallCreator(conversationId, callId)
-        if (creator && creator !== principal.userId) return safeAck(ack, err('Host only', 'FORBIDDEN'))
-      }
+      // assertCallHost() already includes the assertMember check above.
+      await assertCallHost(deps, conversationId, callId, principal)
       await deps.callsService?.setRtmp?.(conversationId, callId, false)
       safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_RTMP_CHANGED, {
         conversationId, callId, rtmpActive: false, changedAt: new Date().toISOString(),
