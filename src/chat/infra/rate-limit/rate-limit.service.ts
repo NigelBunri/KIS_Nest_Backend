@@ -74,17 +74,29 @@ export class RateLimitService implements OnModuleInit, OnModuleDestroy {
   async assertAllowed(opts: { key: string; limit: number; windowMs: number }) {
     const redis = this.getRedis()
     if (redis) {
+      // Only the Redis I/O itself (a dropped connection, a command
+      // timeout) is allowed to fall through to the in-memory bucket below.
+      // The over-limit decision is computed from that I/O's result and
+      // must never be caught here - it used to sit inside this same try
+      // block, so the deliberate "too many requests" throw was being
+      // swallowed by the catch meant only for connectivity failures,
+      // silently degrading every Redis-backed rate limit in production to
+      // an in-memory-only limiter that resets on every restart and never
+      // shares state across instances.
+      let count: number
       try {
-        const count = await redis.incr(opts.key)
+        count = await redis.incr(opts.key)
         if (count === 1) {
           await redis.pexpire(opts.key, opts.windowMs)
         }
+      } catch {
+        count = -1 // sentinel: Redis I/O failed, fall through below
+      }
+      if (count >= 0) {
         if (count > opts.limit) {
           throw new HttpException('Too many requests', HttpStatus.TOO_MANY_REQUESTS)
         }
         return
-      } catch {
-        // fall through to in-memory on redis failure
       }
     }
 
