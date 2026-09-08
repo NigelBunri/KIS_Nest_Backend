@@ -25,6 +25,12 @@ type PartnerEventPayload = {
   data?: Record<string, unknown>
 }
 
+type CommunityEventPayload = {
+  event?: string
+  userIds?: string[]
+  data?: Record<string, unknown>
+}
+
 @Controller('internal')
 @UseGuards(InternalAuthGuard)
 export class RealtimeInternalController {
@@ -107,6 +113,42 @@ export class RealtimeInternalController {
     const body = {
       event,
       partnerId: String(partnerId || ''),
+      data: payload?.data || {},
+      at: new Date().toISOString(),
+    }
+
+    for (const userId of userIds) {
+      try {
+        this.gateway.server?.to(rooms.userRoom(userId)).emit(event, { ...body, userId })
+      } catch {}
+    }
+
+    return { ok: true, emitted: userIds.length }
+  }
+
+  // Django calls this after a Community-system change that affected users
+  // should see live (member joined/left/removed/banned, role changed,
+  // join request created/decided, post created/updated/deleted, new
+  // comment) — see apps.communities.realtime.notify_nest_of_community_event
+  // on the Django side. Same generic per-user-room fan-out shape as
+  // partners/:partnerId/events above - copied rather than shared because
+  // the two systems' event catalogs are independent and unlikely to need
+  // to change in lockstep; a shared generic entities/:type/:id/events
+  // endpoint would be a reasonable follow-up if a third caller ever needs
+  // this same shape.
+  @Post('communities/:communityId/events')
+  handleCommunityEvent(@Param('communityId') communityId: string, @Body() payload: CommunityEventPayload) {
+    const event = String(payload?.event || '').trim()
+    const userIds = Array.from(
+      new Set((Array.isArray(payload?.userIds) ? payload.userIds : []).map((v) => String(v || '').trim()).filter(Boolean)),
+    )
+    if (!event || userIds.length === 0) {
+      return { ok: false }
+    }
+
+    const body = {
+      event,
+      communityId: String(communityId || ''),
       data: payload?.data || {},
       at: new Date().toISOString(),
     }
