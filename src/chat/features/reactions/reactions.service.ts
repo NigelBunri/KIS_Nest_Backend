@@ -38,6 +38,7 @@ export class ReactionsService {
     })
 
     if (!msg) throw new NotFoundException('Message not found')
+    if ((msg as any).isDeleted) throw new NotFoundException('Message not found')
 
     const existing = (msg.reactions ?? []).find((r: any) => r.userId === args.userId)
 

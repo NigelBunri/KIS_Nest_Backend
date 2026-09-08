@@ -1,9 +1,13 @@
+import { randomUUID } from 'crypto'
+
 import { BadRequestException, Body, Controller, Param, Post, UseGuards } from '@nestjs/common'
 
 import { InternalAuthGuard } from '../auth/internal-auth.guard'
 import { AttachmentAccessService } from '../uploads/attachment-access.service'
 import { MessagesService } from '../chat/features/messages/messages.service'
-import { rooms } from '../chat/chat.types'
+import { DjangoSeqClient } from '../chat/integrations/django/django-seq.client'
+import { DjangoConversationClient } from '../chat/integrations/django/django-conversation.client'
+import { EVT, MessageKind, rooms } from '../chat/chat.types'
 import { ChatGateway } from './chat.gateway'
 
 type ConversationCreatedPayload = {
@@ -32,7 +36,66 @@ export class RealtimeInternalController {
     private readonly gateway: ChatGateway,
     private readonly attachmentAccess: AttachmentAccessService,
     private readonly messagesService: MessagesService,
+    private readonly seqClient: DjangoSeqClient,
+    private readonly conversationClient: DjangoConversationClient,
   ) {}
+
+  // Django's Status-reply endpoint calls this (apps/statuses/views.py::reply)
+  // to actually deliver a reply-to-a-status as a real message in the DM
+  // conversation between the viewer and the status's author. Django itself
+  // has no Message model at all — every conversation's real content lives
+  // here in Mongo (see message.schema.ts) — so "create a message on this
+  // user's behalf" has to be a real internal call into the same pipeline a
+  // live socket send uses (seq allocation + createIdempotent), not a
+  // second, parallel persistence path.
+  //
+  // Deliberately narrower than a full socket send: it emits chat.message to
+  // the conversation room (so an already-open chat updates live) and
+  // updates Django's last-message preview, but does NOT run the live-send
+  // handler's broader fan-out (per-member CONVERSATION_UPDATED/badge
+  // events, offline push notification). A status reply is a background,
+  // occasional action, not a primary chat surface — see the Phase 4 report
+  // for this explicitly flagged as a smaller, deferred follow-up rather
+  // than silently claimed as full parity with a live chat send.
+  @Post('messages/send-as-user')
+  async sendMessageAsUser(
+    @Body() body: { conversationId?: string; senderId?: string; text?: string; clientId?: string },
+  ) {
+    const conversationId = String(body?.conversationId || '').trim()
+    const senderId = String(body?.senderId || '').trim()
+    const text = String(body?.text || '').trim()
+    if (!conversationId || !senderId || !text) {
+      throw new BadRequestException('conversationId, senderId, and text are required.')
+    }
+
+    const clientId = String(body?.clientId || '').trim() || randomUUID()
+    const seq = await this.seqClient.allocateSeq(conversationId)
+    const created = await this.messagesService.createIdempotent({
+      senderId,
+      conversationId,
+      clientId,
+      seq,
+      input: { conversationId, clientId, kind: MessageKind.TEXT, text },
+    })
+
+    const createdDto = (created as any).dto ?? created
+    try {
+      this.gateway.server?.to(rooms.convRoom(conversationId)).emit(EVT.MESSAGE, createdDto)
+    } catch {}
+
+    await this.conversationClient
+      .updateLastMessage({ conversationId, createdAt: created.createdAt, preview: text })
+      .catch(() => {})
+
+    return {
+      ok: true,
+      messageId: created.id,
+      seq: created.seq,
+      conversationId,
+      clientId,
+      createdAt: created.createdAt,
+    }
+  }
 
   @Post('conversations/created')
   handleConversationCreated(@Body() payload: ConversationCreatedPayload) {
