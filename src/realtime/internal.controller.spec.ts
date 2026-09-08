@@ -19,7 +19,7 @@ function makeMessagesService(
 describe('RealtimeInternalController.handlePartnerEvent', () => {
   it('fans out the event to each user room', () => {
     const { gateway, to, emit } = makeGateway()
-    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService())
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
 
     const result = controller.handlePartnerEvent('partner-1', {
       event: 'partner.member_kicked',
@@ -38,7 +38,7 @@ describe('RealtimeInternalController.handlePartnerEvent', () => {
 
   it('dedupes duplicate user ids', () => {
     const { gateway, to } = makeGateway()
-    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService())
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
 
     const result = controller.handlePartnerEvent('partner-1', {
       event: 'partner.role_updated',
@@ -51,14 +51,14 @@ describe('RealtimeInternalController.handlePartnerEvent', () => {
 
   it('returns ok:false when event or userIds is missing', () => {
     const { gateway } = makeGateway()
-    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService())
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
 
     expect(controller.handlePartnerEvent('partner-1', { userIds: ['user-1'] })).toEqual({ ok: false })
     expect(controller.handlePartnerEvent('partner-1', { event: 'partner.role_updated', userIds: [] })).toEqual({ ok: false })
   })
 
   it('does not throw when the gateway server is unavailable', () => {
-    const controller = new RealtimeInternalController({ server: null } as any, {} as any, makeMessagesService())
+    const controller = new RealtimeInternalController({ server: null } as any, {} as any, makeMessagesService(), {} as any, {} as any)
 
     const result = controller.handlePartnerEvent('partner-1', {
       event: 'partner.role_updated',
@@ -78,7 +78,7 @@ describe('RealtimeInternalController.purgeUserMessages', () => {
         conversationIds: ['conv-1', 'conv-2'],
       }),
     })
-    const controller = new RealtimeInternalController(gateway, {} as any, messagesService)
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, {} as any, {} as any)
 
     const result = await controller.purgeUserMessages('user-1')
 
@@ -95,7 +95,7 @@ describe('RealtimeInternalController.purgeUserMessages', () => {
   it('rejects a missing userId', async () => {
     const { gateway } = makeGateway()
     const messagesService = makeMessagesService()
-    const controller = new RealtimeInternalController(gateway, {} as any, messagesService)
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, {} as any, {} as any)
 
     await expect(controller.purgeUserMessages('   ')).rejects.toThrow('userId is required.')
     expect(messagesService.purgeMessagesForUser).not.toHaveBeenCalled()
@@ -108,7 +108,7 @@ describe('RealtimeInternalController.purgeUserMessages', () => {
         conversationIds: ['conv-1'],
       }),
     })
-    const controller = new RealtimeInternalController({ server: null } as any, {} as any, messagesService)
+    const controller = new RealtimeInternalController({ server: null } as any, {} as any, messagesService, {} as any, {} as any)
 
     const result = await controller.purgeUserMessages('user-1')
 
@@ -122,7 +122,7 @@ describe('RealtimeInternalController.moderatorDeleteMessage', () => {
     const messagesService = makeMessagesService({
       moderatorDeleteMessage: jest.fn().mockResolvedValue({ found: true }),
     })
-    const controller = new RealtimeInternalController(gateway, {} as any, messagesService)
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, {} as any, {} as any)
 
     const result = await controller.moderatorDeleteMessage('conv-1', 'msg-1')
 
@@ -143,7 +143,7 @@ describe('RealtimeInternalController.moderatorDeleteMessage', () => {
     const messagesService = makeMessagesService({
       moderatorDeleteMessage: jest.fn().mockResolvedValue({ found: false }),
     })
-    const controller = new RealtimeInternalController(gateway, {} as any, messagesService)
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, {} as any, {} as any)
 
     const result = await controller.moderatorDeleteMessage('conv-1', 'missing')
 
@@ -154,7 +154,7 @@ describe('RealtimeInternalController.moderatorDeleteMessage', () => {
   it('rejects a missing conversationId or messageId', async () => {
     const { gateway } = makeGateway()
     const messagesService = makeMessagesService()
-    const controller = new RealtimeInternalController(gateway, {} as any, messagesService)
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, {} as any, {} as any)
 
     await expect(controller.moderatorDeleteMessage('', 'msg-1')).rejects.toThrow(
       'conversationId and messageId are required.',
@@ -163,5 +163,123 @@ describe('RealtimeInternalController.moderatorDeleteMessage', () => {
       'conversationId and messageId are required.',
     )
     expect(messagesService.moderatorDeleteMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('RealtimeInternalController.sendMessageAsUser', () => {
+  function makeSeqClient(seq = 7) {
+    return { allocateSeq: jest.fn().mockResolvedValue(seq) } as any
+  }
+  function makeConversationClient() {
+    return { updateLastMessage: jest.fn().mockResolvedValue(undefined) } as any
+  }
+  function makeCreateMessagesService() {
+    return {
+      createIdempotent: jest.fn().mockResolvedValue({
+        id: 'msg-1',
+        seq: 7,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        dto: { id: 'msg-1', text: 'hello', conversationId: 'conv-1' },
+        reused: false,
+      }),
+    } as any
+  }
+
+  it('allocates a seq, persists the message, and emits it to the conversation room', async () => {
+    const { gateway, to, emit } = makeGateway()
+    const seqClient = makeSeqClient(7)
+    const conversationClient = makeConversationClient()
+    const messagesService = makeCreateMessagesService()
+    const controller = new RealtimeInternalController(gateway, {} as any, messagesService, seqClient, conversationClient)
+
+    const result = await controller.sendMessageAsUser({
+      conversationId: 'conv-1',
+      senderId: 'user-1',
+      text: 'hello',
+    })
+
+    expect(seqClient.allocateSeq).toHaveBeenCalledWith('conv-1')
+    expect(messagesService.createIdempotent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderId: 'user-1',
+        conversationId: 'conv-1',
+        seq: 7,
+        input: expect.objectContaining({ kind: 'text', text: 'hello', conversationId: 'conv-1' }),
+      }),
+    )
+    expect(to).toHaveBeenCalledWith('conv:conv-1')
+    expect(emit).toHaveBeenCalledWith('chat.message', expect.objectContaining({ id: 'msg-1', text: 'hello' }))
+    expect(conversationClient.updateLastMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conv-1', preview: 'hello' }),
+    )
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, messageId: 'msg-1', seq: 7, conversationId: 'conv-1' }),
+    )
+  })
+
+  it('generates a clientId when none is provided, and reuses one when given', async () => {
+    const { gateway } = makeGateway()
+    const messagesService = makeCreateMessagesService()
+    const controller = new RealtimeInternalController(
+      gateway,
+      {} as any,
+      messagesService,
+      makeSeqClient(),
+      makeConversationClient(),
+    )
+
+    await controller.sendMessageAsUser({ conversationId: 'conv-1', senderId: 'user-1', text: 'hi' })
+    const generatedClientId = messagesService.createIdempotent.mock.calls[0][0].clientId
+    expect(typeof generatedClientId).toBe('string')
+    expect(generatedClientId.length).toBeGreaterThan(0)
+
+    await controller.sendMessageAsUser({
+      conversationId: 'conv-1',
+      senderId: 'user-1',
+      text: 'hi',
+      clientId: 'fixed-client-id',
+    })
+    expect(messagesService.createIdempotent.mock.calls[1][0].clientId).toBe('fixed-client-id')
+  })
+
+  it('rejects when conversationId, senderId, or text is missing', async () => {
+    const { gateway } = makeGateway()
+    const seqClient = makeSeqClient()
+    const controller = new RealtimeInternalController(
+      gateway,
+      {} as any,
+      makeCreateMessagesService(),
+      seqClient,
+      makeConversationClient(),
+    )
+
+    await expect(
+      controller.sendMessageAsUser({ senderId: 'user-1', text: 'hi' }),
+    ).rejects.toThrow('conversationId, senderId, and text are required.')
+    await expect(
+      controller.sendMessageAsUser({ conversationId: 'conv-1', text: 'hi' }),
+    ).rejects.toThrow('conversationId, senderId, and text are required.')
+    await expect(
+      controller.sendMessageAsUser({ conversationId: 'conv-1', senderId: 'user-1', text: '   ' }),
+    ).rejects.toThrow('conversationId, senderId, and text are required.')
+    expect(seqClient.allocateSeq).not.toHaveBeenCalled()
+  })
+
+  it('does not throw when the gateway server is unavailable', async () => {
+    const messagesService = makeCreateMessagesService()
+    const controller = new RealtimeInternalController(
+      { server: null } as any,
+      {} as any,
+      messagesService,
+      makeSeqClient(),
+      makeConversationClient(),
+    )
+
+    const result = await controller.sendMessageAsUser({
+      conversationId: 'conv-1',
+      senderId: 'user-1',
+      text: 'hello',
+    })
+    expect(result.ok).toBe(true)
   })
 })
