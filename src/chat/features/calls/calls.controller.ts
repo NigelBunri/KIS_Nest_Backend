@@ -270,7 +270,13 @@ export class CallsController {
     return {
       inviteToken: token,
       inviteLink: `kis://call/join/${token}`,
-      webLink: `https://kis.app/call/join/${token}`,
+      // kis.app is registered but has no live web server behind it as of
+      // 2026-09-09 (confirmed via a direct HTTPS probe - connection times
+      // out) - a link shared outside the app to that domain would fail
+      // for every recipient, installed or not. Falls back to
+      // kingdomimpactventures.org, the one domain that's actually live,
+      // matching the same fix applied to Django's KIS_WEBSITE_PUBLIC_BASE_URL.
+      webLink: `${process.env.KIS_WEBSITE_PUBLIC_BASE_URL || 'https://kingdomimpactventures.org'}/call/join/${token}`,
     }
   }
 
