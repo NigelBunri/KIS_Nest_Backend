@@ -169,6 +169,32 @@ class BibleVerse {
 const BibleVerseSchema = SchemaFactory.createForClass(BibleVerse);
 
 @Schema({ _id: false })
+class BibleGameStats {
+  // 'game' = one game's own progress; 'general' = the cross-game overall
+  // summary. Flat optional-fields shape (not a real Mongo discriminator)
+  // since this is a point-in-time chat snapshot, not a queryable model -
+  // see src/Module/ChatRoom/chatTypes.ts on the frontend for the
+  // discriminated-union shape this mirrors.
+  @Prop({ required: true }) scope!: 'game' | 'general';
+
+  // scope: 'game'
+  @Prop() gameKey?: string;
+  @Prop() gameTitle?: string;
+  @Prop() stagesCompleted?: number;
+  @Prop() totalStages?: number;
+  @Prop() verseCount?: number;
+  @Prop() bestScore?: number;
+
+  // scope: 'general'
+  @Prop() totalBibleVerses?: number;
+  @Prop() versesCovered?: number;
+  @Prop() gamesCompleted?: number;
+  @Prop() totalGames?: number;
+  @Prop() timesCompletedBible?: number;
+}
+const BibleGameStatsSchema = SchemaFactory.createForClass(BibleGameStats);
+
+@Schema({ _id: false })
 class LinkPreview {
   @Prop() url?: string;
   @Prop() title?: string;
@@ -225,7 +251,8 @@ export type MessageKind =
   | 'event'
   | 'location'
   | 'call_event'
-  | 'bible_verse';
+  | 'bible_verse'
+  | 'bible_game_stats';
 
 @Schema({
   timestamps: true,
@@ -248,7 +275,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse', 'bible_game_stats'],
   })
   kind!: MessageKind;
 
@@ -301,6 +328,9 @@ export class Message {
 
   @Prop({ type: BibleVerseSchema })
   bibleVerse?: BibleVerse;
+
+  @Prop({ type: BibleGameStatsSchema })
+  bibleGameStats?: BibleGameStats;
 
   @Prop({ type: LinkPreviewSchema })
   linkPreview?: LinkPreview;

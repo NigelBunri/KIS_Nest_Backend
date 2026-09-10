@@ -177,6 +177,25 @@ export class BibleVerseDto {
   @IsOptional() @IsString() text?: string;
 }
 
+export class BibleGameStatsDto {
+  @IsIn(['game', 'general']) scope!: 'game' | 'general';
+
+  // scope: 'game'
+  @IsOptional() @IsString() gameKey?: string;
+  @IsOptional() @IsString() gameTitle?: string;
+  @IsOptional() @IsInt() @Min(0) stagesCompleted?: number;
+  @IsOptional() @IsInt() @Min(0) totalStages?: number;
+  @IsOptional() @IsInt() @Min(0) verseCount?: number;
+  @IsOptional() @IsInt() @Min(0) bestScore?: number;
+
+  // scope: 'general'
+  @IsOptional() @IsInt() @Min(0) totalBibleVerses?: number;
+  @IsOptional() @IsInt() @Min(0) versesCovered?: number;
+  @IsOptional() @IsInt() @Min(0) gamesCompleted?: number;
+  @IsOptional() @IsInt() @Min(0) totalGames?: number;
+  @IsOptional() @IsInt() @Min(0) timesCompletedBible?: number;
+}
+
 export class LinkPreviewDto {
   @IsOptional() @IsString() url?: string;
   @IsOptional() @IsString() title?: string;
@@ -288,6 +307,11 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => BibleVerseDto)
   bibleVerse?: BibleVerseDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BibleGameStatsDto)
+  bibleGameStats?: BibleGameStatsDto;
 
   @IsOptional()
   @ValidateNested()
