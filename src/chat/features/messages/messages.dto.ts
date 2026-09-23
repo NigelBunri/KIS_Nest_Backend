@@ -196,6 +196,24 @@ export class BibleGameStatsDto {
   @IsOptional() @IsInt() @Min(0) timesCompletedBible?: number;
 }
 
+export class BibleDiscipleshipStatsDto {
+  @IsIn(['doctrine', 'overall']) scope!: 'doctrine' | 'overall';
+
+  // shared by both scopes
+  @IsOptional() @IsInt() @Min(0) daysCompleted?: number;
+  @IsOptional() @IsInt() @Min(0) totalDays?: number;
+
+  // scope: 'doctrine'
+  @IsOptional() @IsInt() @Min(1) doctrineOrder?: number;
+  @IsOptional() @IsString() doctrineTitle?: string;
+  @IsOptional() @IsInt() @Min(0) bestDayScorePercent?: number;
+
+  // scope: 'overall'
+  @IsOptional() @IsInt() @Min(0) doctrinesCompleted?: number;
+  @IsOptional() @IsInt() @Min(0) totalDoctrines?: number;
+  @IsOptional() @IsBoolean() hasCertificate?: boolean;
+}
+
 export class LinkPreviewDto {
   @IsOptional() @IsString() url?: string;
   @IsOptional() @IsString() title?: string;
@@ -312,6 +330,11 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => BibleGameStatsDto)
   bibleGameStats?: BibleGameStatsDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BibleDiscipleshipStatsDto)
+  bibleDiscipleshipStats?: BibleDiscipleshipStatsDto;
 
   @IsOptional()
   @ValidateNested()

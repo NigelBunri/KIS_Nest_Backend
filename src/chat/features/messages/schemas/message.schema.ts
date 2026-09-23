@@ -195,6 +195,30 @@ class BibleGameStats {
 const BibleGameStatsSchema = SchemaFactory.createForClass(BibleGameStats);
 
 @Schema({ _id: false })
+class BibleDiscipleshipStats {
+  // 'doctrine' = one doctrine's own day-by-day progress; 'overall' = the
+  // cross-doctrine summary across all 12 pillars. Same flat optional-fields
+  // shape as BibleGameStats above (point-in-time chat snapshot, not a
+  // queryable model) - see src/Module/ChatRoom/chatTypes.ts on the frontend.
+  @Prop({ required: true }) scope!: 'doctrine' | 'overall';
+
+  // shared by both scopes
+  @Prop() daysCompleted?: number;
+  @Prop() totalDays?: number;
+
+  // scope: 'doctrine'
+  @Prop() doctrineOrder?: number;
+  @Prop() doctrineTitle?: string;
+  @Prop() bestDayScorePercent?: number;
+
+  // scope: 'overall'
+  @Prop() doctrinesCompleted?: number;
+  @Prop() totalDoctrines?: number;
+  @Prop() hasCertificate?: boolean;
+}
+const BibleDiscipleshipStatsSchema = SchemaFactory.createForClass(BibleDiscipleshipStats);
+
+@Schema({ _id: false })
 class LinkPreview {
   @Prop() url?: string;
   @Prop() title?: string;
@@ -252,7 +276,8 @@ export type MessageKind =
   | 'location'
   | 'call_event'
   | 'bible_verse'
-  | 'bible_game_stats';
+  | 'bible_game_stats'
+  | 'bible_discipleship_stats';
 
 @Schema({
   timestamps: true,
@@ -275,7 +300,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse', 'bible_game_stats'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse', 'bible_game_stats', 'bible_discipleship_stats'],
   })
   kind!: MessageKind;
 
@@ -331,6 +356,9 @@ export class Message {
 
   @Prop({ type: BibleGameStatsSchema })
   bibleGameStats?: BibleGameStats;
+
+  @Prop({ type: BibleDiscipleshipStatsSchema })
+  bibleDiscipleshipStats?: BibleDiscipleshipStats;
 
   @Prop({ type: LinkPreviewSchema })
   linkPreview?: LinkPreview;

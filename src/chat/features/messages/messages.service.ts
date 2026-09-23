@@ -27,6 +27,7 @@ const MESSAGE_CONTENT_FIELDS_UNSET = {
   location: '',
   bibleVerse: '',
   bibleGameStats: '',
+  bibleDiscipleshipStats: '',
   linkPreview: '',
   previewText: '',
   ciphertext: '',
@@ -102,6 +103,7 @@ export class MessagesService {
       location: (input as any).location,
       bibleVerse: (input as any).bibleVerse,
       bibleGameStats: (input as any).bibleGameStats,
+      bibleDiscipleshipStats: (input as any).bibleDiscipleshipStats,
       linkPreview: (input as any).linkPreview,
 
       replyToId: input.replyToId,
@@ -645,6 +647,7 @@ export class MessagesService {
       'call_event',
       'bible_verse',
       'bible_game_stats',
+      'bible_discipleship_stats',
     ])
     if (!allowedKinds.has(kind)) throw new BadRequestException(`Unsupported kind: ${String(kind)}`)
     if (hasEncryptedPayload) return
@@ -663,6 +666,7 @@ export class MessagesService {
     const hasLocation = !!(input as any).location
     const hasBibleVerse = !!(input as any).bibleVerse
     const hasBibleGameStats = !!(input as any).bibleGameStats
+    const hasBibleDiscipleshipStats = !!(input as any).bibleDiscipleshipStats
 
     switch (kind) {
       case 'text':
@@ -698,6 +702,9 @@ export class MessagesService {
       case 'bible_game_stats':
         if (!hasBibleGameStats) throw new BadRequestException('bible_game_stats requires bibleGameStats payload')
         break
+      case 'bible_discipleship_stats':
+        if (!hasBibleDiscipleshipStats) throw new BadRequestException('bible_discipleship_stats requires bibleDiscipleshipStats payload')
+        break
       case 'system':
         if (!hasText) throw new BadRequestException('system requires text')
         break
@@ -715,6 +722,7 @@ export class MessagesService {
     if (kind !== 'location' && hasLocation) throw new BadRequestException('location payload only allowed for location kind')
     if (kind !== 'bible_verse' && hasBibleVerse) throw new BadRequestException('bibleVerse payload only allowed for bible_verse kind')
     if (kind !== 'bible_game_stats' && hasBibleGameStats) throw new BadRequestException('bibleGameStats payload only allowed for bible_game_stats kind')
+    if (kind !== 'bible_discipleship_stats' && hasBibleDiscipleshipStats) throw new BadRequestException('bibleDiscipleshipStats payload only allowed for bible_discipleship_stats kind')
   }
 
   private buildPreview(input: SendMessageDto): string | undefined {
@@ -755,6 +763,12 @@ export class MessagesService {
         return stats?.scope === 'general'
           ? `🏆 Bible games progress: ${stats?.versesCovered ?? 0}/${stats?.totalBibleVerses ?? 0} verses`
           : `🏆 ${stats?.gameTitle ?? 'Bible game'} progress`
+      }
+      case 'bible_discipleship_stats': {
+        const stats = (input as any).bibleDiscipleshipStats
+        return stats?.scope === 'overall'
+          ? `📜 Discipleship progress: ${stats?.doctrinesCompleted ?? 0}/${stats?.totalDoctrines ?? 12} doctrines`
+          : `📜 ${stats?.doctrineTitle ?? 'Doctrine'} progress`
       }
       case 'system':
         return input.text?.slice(0, 200)
