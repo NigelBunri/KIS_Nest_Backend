@@ -1,6 +1,6 @@
 // src/chat/features/messages/messages.service.ts
 
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
 import { InjectModel } from '@nestjs/mongoose'
 import { Model } from 'mongoose'
 
@@ -8,6 +8,7 @@ import { Message, MessageDocument, MessageKind } from './schemas/message.schema'
 import { SendMessageDto } from './messages.dto'
 import type { SendMessagePayload, EditMessagePayload } from '../../chat.types'
 import { UploadIntent, UploadIntentDocument } from '../../../uploads/schemas/upload-intent.schema'
+import { StorageService } from '../../../storage/storage.service'
 
 // Shared by every path that actually scrubs a message's content (as
 // opposed to deleteMessageLegacy's user-initiated delete-for-everyone,
@@ -39,10 +40,42 @@ const MESSAGE_CONTENT_FIELDS_UNSET = {
 
 @Injectable()
 export class MessagesService {
+  private readonly logger = new Logger(MessagesService.name)
+
   constructor(
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
     @InjectModel(UploadIntent.name) private readonly uploadIntentModel: Model<UploadIntentDocument>,
+    private readonly storage: StorageService,
   ) {}
+
+  /** Best-effort delete of every attachment's storage object for one
+   * message, resolving each key the same way media-cleanup.service.ts's
+   * runCleanup() already does (storageKey, falling back to id for legacy
+   * rows that predate storageKey existing). Called right before content is
+   * actually discarded ($unset) in scrubContentForMessagesDeletedBefore /
+   * purgeMessagesForUser / moderatorDeleteMessage - never at the earlier
+   * isDeleted flag-flip, which deliberately leaves content in place for
+   * the retention window. A storage failure is logged, never allowed to
+   * block the Mongo update it precedes. */
+  private async purgeMessageAttachmentStorage(msg: any): Promise<void> {
+    const lists = [msg?.attachments, msg?.media?.attachments].filter(Array.isArray)
+    const keys = new Set<string>()
+    for (const list of lists) {
+      for (const att of list) {
+        const key: string | undefined = att?.storageKey || att?.id
+        if (key) keys.add(key)
+      }
+    }
+    for (const key of keys) {
+      try {
+        await this.storage.deleteFile(key)
+      } catch (e: any) {
+        if (e?.name !== 'NoSuchKey' && !String(e?.message ?? '').includes('NoSuchKey')) {
+          this.logger.warn(`Failed to delete attachment key=${key}: ${e?.message}`)
+        }
+      }
+    }
+  }
 
   /**
    * ✅ Legacy implementation (your DB write path)
@@ -370,6 +403,14 @@ export class MessagesService {
     const filter = { senderId: userId, isDeleted: { $ne: true } }
     const conversationIds = await this.messageModel.distinct('conversationId', filter)
 
+    // Captured BEFORE the $unset below removes it - storage.deleteFile()
+    // needs each message's real attachment keys, which the update itself
+    // is about to permanently erase from the document.
+    const toPurge = await this.messageModel
+      .find(filter, { attachments: 1, 'media.attachments': 1 })
+      .lean()
+      .exec()
+
     const nowMs = Date.now()
     const result = await this.messageModel.updateMany(filter, {
       $set: {
@@ -380,6 +421,10 @@ export class MessagesService {
       },
       $unset: MESSAGE_CONTENT_FIELDS_UNSET,
     })
+
+    for (const msg of toPurge) {
+      await this.purgeMessageAttachmentStorage(msg)
+    }
 
     return {
       scrubbed: result.modifiedCount ?? 0,
@@ -401,19 +446,27 @@ export class MessagesService {
     conversationId: string
     messageId: string
   }): Promise<{ found: boolean }> {
+    const filter = { _id: args.messageId, conversationId: args.conversationId, isDeleted: { $ne: true } }
+    // Same reasoning as purgeMessagesForUser - captured before $unset.
+    const existing = await this.messageModel
+      .findOne(filter, { attachments: 1, 'media.attachments': 1 })
+      .lean()
+      .exec()
+
     const nowMs = Date.now()
-    const result = await this.messageModel.updateOne(
-      { _id: args.messageId, conversationId: args.conversationId, isDeleted: { $ne: true } },
-      {
-        $set: {
-          isDeleted: true,
-          deleteState: 'deleted_for_everyone',
-          deletedAt: nowMs,
-          deletedBy: 'moderation',
-        },
-        $unset: MESSAGE_CONTENT_FIELDS_UNSET,
+    const result = await this.messageModel.updateOne(filter, {
+      $set: {
+        isDeleted: true,
+        deleteState: 'deleted_for_everyone',
+        deletedAt: nowMs,
+        deletedBy: 'moderation',
       },
-    )
+      $unset: MESSAGE_CONTENT_FIELDS_UNSET,
+    })
+
+    if (existing) {
+      await this.purgeMessageAttachmentStorage(existing)
+    }
     return { found: (result.matchedCount ?? 0) > 0 }
   }
 
@@ -437,10 +490,24 @@ export class MessagesService {
     // sweeping those forever rather than just once. $unset on fields that
     // are already absent is a safe Mongo no-op, so an already-scrubbed row
     // simply contributes 0 to modifiedCount instead of being excluded.
-    const result = await this.messageModel.updateMany(
-      { isDeleted: true, deletedAt: { $lt: cutoffMs } },
-      { $unset: MESSAGE_CONTENT_FIELDS_UNSET },
-    )
+    const filter = { isDeleted: true, deletedAt: { $lt: cutoffMs } }
+
+    // This is the point real content - and any attachment it references -
+    // is genuinely, permanently discarded, so it's also the right point to
+    // finally purge those objects from storage; nothing earlier in this
+    // message's lifecycle (the isDeleted flag-flip) was ever supposed to
+    // touch storage, by design. Captured before $unset removes it.
+    const toPurge = await this.messageModel
+      .find(filter, { attachments: 1, 'media.attachments': 1 })
+      .lean()
+      .exec()
+
+    const result = await this.messageModel.updateMany(filter, { $unset: MESSAGE_CONTENT_FIELDS_UNSET })
+
+    for (const msg of toPurge) {
+      await this.purgeMessageAttachmentStorage(msg)
+    }
+
     return { scrubbed: result.modifiedCount ?? 0 }
   }
 
