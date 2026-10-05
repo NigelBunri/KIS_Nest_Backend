@@ -163,6 +163,14 @@ export class LocationDto {
   title?: string;
 }
 
+export class PaymentDto {
+  @IsNumber() amount!: number;
+  @IsString() currency!: string;
+
+  @IsOptional() @IsString()
+  note?: string;
+}
+
 export class BibleVerseDto {
   @IsString() reference!: string;
 
@@ -320,6 +328,11 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => LocationDto)
   location?: LocationDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PaymentDto)
+  payment?: PaymentDto;
 
   @IsOptional()
   @ValidateNested()

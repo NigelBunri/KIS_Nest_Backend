@@ -15,6 +15,7 @@ export enum MessageKind {
   POLL = 'poll',
   EVENT = 'event',
   LOCATION = 'location',
+  PAYMENT = 'payment',
   CALL_EVENT = 'call_event',
   BIBLE_VERSE = 'bible_verse',
   BIBLE_GAME_STATS = 'bible_game_stats',

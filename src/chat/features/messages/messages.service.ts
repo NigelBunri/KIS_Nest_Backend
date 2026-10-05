@@ -26,6 +26,7 @@ const MESSAGE_CONTENT_FIELDS_UNSET = {
   poll: '',
   event: '',
   location: '',
+  payment: '',
   bibleVerse: '',
   bibleGameStats: '',
   bibleDiscipleshipStats: '',
@@ -134,6 +135,7 @@ export class MessagesService {
       poll: input.poll,
       event: input.event,
       location: (input as any).location,
+      payment: (input as any).payment,
       bibleVerse: (input as any).bibleVerse,
       bibleGameStats: (input as any).bibleGameStats,
       bibleDiscipleshipStats: (input as any).bibleDiscipleshipStats,
@@ -710,6 +712,7 @@ export class MessagesService {
       'poll',
       'event',
       'location',
+      'payment',
       'system',
       'call_event',
       'bible_verse',
@@ -731,6 +734,7 @@ export class MessagesService {
     const hasPoll = !!input.poll
     const hasEvent = !!input.event
     const hasLocation = !!(input as any).location
+    const hasPayment = !!(input as any).payment
     const hasBibleVerse = !!(input as any).bibleVerse
     const hasBibleGameStats = !!(input as any).bibleGameStats
     const hasBibleDiscipleshipStats = !!(input as any).bibleDiscipleshipStats
@@ -763,6 +767,9 @@ export class MessagesService {
       case 'location':
         if (!hasLocation) throw new BadRequestException('location requires location payload')
         break
+      case 'payment':
+        if (!hasPayment) throw new BadRequestException('payment requires payment payload')
+        break
       case 'bible_verse':
         if (!hasBibleVerse) throw new BadRequestException('bible_verse requires bibleVerse payload')
         break
@@ -787,6 +794,7 @@ export class MessagesService {
     if (kind !== 'poll' && hasPoll) throw new BadRequestException('poll payload only allowed for poll kind')
     if (kind !== 'event' && hasEvent) throw new BadRequestException('event payload only allowed for event kind')
     if (kind !== 'location' && hasLocation) throw new BadRequestException('location payload only allowed for location kind')
+    if (kind !== 'payment' && hasPayment) throw new BadRequestException('payment payload only allowed for payment kind')
     if (kind !== 'bible_verse' && hasBibleVerse) throw new BadRequestException('bibleVerse payload only allowed for bible_verse kind')
     if (kind !== 'bible_game_stats' && hasBibleGameStats) throw new BadRequestException('bibleGameStats payload only allowed for bible_game_stats kind')
     if (kind !== 'bible_discipleship_stats' && hasBibleDiscipleshipStats) throw new BadRequestException('bibleDiscipleshipStats payload only allowed for bible_discipleship_stats kind')
@@ -823,6 +831,10 @@ export class MessagesService {
         return `📅 ${input.event?.title ?? 'Event'}`
       case 'location':
         return `📍 ${(input as any).location?.title ?? (input as any).location?.address ?? 'Location'}`
+      case 'payment': {
+        const payment = (input as any).payment
+        return `💰 ${payment?.currency ?? ''} ${payment?.amount ?? ''}`.trim() || '💰 Payment'
+      }
       case 'bible_verse':
         return `📖 ${(input as any).bibleVerse?.reference ?? 'Bible verse'}`
       case 'bible_game_stats': {

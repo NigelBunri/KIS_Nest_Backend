@@ -152,6 +152,14 @@ class LocationCoords {
 const LocationCoordsSchema = SchemaFactory.createForClass(LocationCoords);
 
 @Schema({ _id: false })
+class PaymentInfo {
+  @Prop({ required: true }) amount!: number;
+  @Prop({ required: true }) currency!: string;
+  @Prop() note?: string;
+}
+const PaymentInfoSchema = SchemaFactory.createForClass(PaymentInfo);
+
+@Schema({ _id: false })
 class BibleVerse {
   // Canonical "Book chapter:verseStart[-verseEnd]" string - what the
   // receiving client's Bible screen actually navigates to (see
@@ -274,6 +282,7 @@ export type MessageKind =
   | 'poll'
   | 'event'
   | 'location'
+  | 'payment'
   | 'call_event'
   | 'bible_verse'
   | 'bible_game_stats'
@@ -300,7 +309,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'call_event', 'bible_verse', 'bible_game_stats', 'bible_discipleship_stats'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'payment', 'call_event', 'bible_verse', 'bible_game_stats', 'bible_discipleship_stats'],
   })
   kind!: MessageKind;
 
@@ -350,6 +359,9 @@ export class Message {
 
   @Prop({ type: LocationCoordsSchema })
   location?: LocationCoords;
+
+  @Prop({ type: PaymentInfoSchema })
+  payment?: PaymentInfo;
 
   @Prop({ type: BibleVerseSchema })
   bibleVerse?: BibleVerse;

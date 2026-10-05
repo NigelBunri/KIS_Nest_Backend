@@ -157,5 +157,12 @@ CallSessionSchema.index({ scheduledFor: 1, status: 1 }, { sparse: true });
 
 // Cleanup / queries
 CallSessionSchema.index({ conversationId: 1, status: 1, startedAt: -1 });
+
+// listUserCalls() queries `{ $or: [{ createdBy }, { 'participants.userId' }] }`
+// sorted by startedAt. createdBy already has its own index (declared on the
+// prop above); without this one, the participants.userId branch of that $or
+// falls back to a full collection scan once call-session volume grows, since
+// participants is stored as a generic Object array with no declared index.
+CallSessionSchema.index({ 'participants.userId': 1, startedAt: -1 });
 CallSessionSchema.index({ endedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 14, partialFilterExpression: { endedAt: { $type: 'date' } } });
 // TTL: keep ended calls 14 days; tune as needed.
