@@ -1,3 +1,7 @@
+// ARCHIVED/LEGACY (2026-10-04): feature-flagged off everywhere (FF_BROADCAST_CORE / FF_FEEDS_BROADCAST unset
+// in every .env*/docker-compose.yml), unreachable at runtime, untouched since its single creation
+// commit ~6 months ago. BLOCKED from deletion: feeds.module.ts/feeds.controller.ts hard-depend on
+// this module at compile time (see src/ARCHIVED_LEGACY_BROADCAST.md for the full writeup).
 import { Module } from '@nestjs/common'
 import { MongooseModule } from '@nestjs/mongoose'
 
