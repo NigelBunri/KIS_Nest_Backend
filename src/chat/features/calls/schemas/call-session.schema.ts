@@ -70,6 +70,22 @@ export class CallSession {
   @Prop({ type: String, required: true })
   createdBy!: string;
 
+  // Captured once, at call.offer time, from the creator's own live socket
+  // principal — the only moment their display name is reliably available
+  // server-side without a dedicated userId->name lookup service. Read back
+  // later by notifyMissedCall (fired by the callee, well after the caller
+  // may have disconnected) so a missed-call push shows a name/phone number
+  // instead of falling back to the caller's raw userId.
+  @Prop({ type: String, default: null })
+  createdByDisplayName!: string | null;
+
+  // Same capture-at-offer-time rationale as createdByDisplayName — a
+  // human-readable identity fallback for a missed-call push when the
+  // caller never set a display name/username/email. Never a placeholder/
+  // synthetic phone (see IntrospectView.phone_is_placeholder on Django).
+  @Prop({ type: String, default: null })
+  createdByPhone!: string | null;
+
   @Prop({ type: String, required: true, enum: ['ringing', 'active', 'ended', 'missed', 'pending'], index: true })
   status!: CallStatus;
 

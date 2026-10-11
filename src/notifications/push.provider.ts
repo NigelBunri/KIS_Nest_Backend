@@ -2,6 +2,14 @@ export type PushMessage = {
   title: string;
   body: string;
   data?: Record<string, string>;
+  /** Drop this push at the provider (FCM/APNs) rather than deliver it after
+   * this many seconds, instead of the provider's default (FCM: 4 weeks;
+   * APNs: provider-specific). Used for time-boxed "ring now" pushes
+   * (incoming calls) where a very late delivery — e.g. a device that was
+   * offline and reconnects long after the call ended — is worse than no
+   * delivery at all. Omit for pushes where late-but-eventual delivery is
+   * still useful (messages, missed-call summaries, etc). */
+  expiresInSeconds?: number;
 };
 
 export type PushSendResult = {

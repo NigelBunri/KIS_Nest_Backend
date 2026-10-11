@@ -17,7 +17,11 @@ export interface ApnsVoipSendResult {
 }
 
 export interface ApnsVoipProvider {
-  sendVoip(tokens: string[], data: Record<string, string>): Promise<ApnsVoipSendResult>;
+  sendVoip(
+    tokens: string[],
+    data: Record<string, string>,
+    opts?: { expiresInSeconds?: number },
+  ): Promise<ApnsVoipSendResult>;
 }
 
 // APNs response reasons that mean the token is permanently invalid and
@@ -40,10 +44,27 @@ function resolveKey(): string | Buffer | null {
 class ApnsVoipPushProvider implements ApnsVoipProvider {
   constructor(private readonly provider: apn.Provider, private readonly topic: string) {}
 
-  async sendVoip(tokens: string[], data: Record<string, string>): Promise<ApnsVoipSendResult> {
+  async sendVoip(
+    tokens: string[],
+    data: Record<string, string>,
+    opts?: { expiresInSeconds?: number },
+  ): Promise<ApnsVoipSendResult> {
     const notification = new apn.Notification();
     notification.topic = this.topic;
     notification.pushType = 'voip';
+    // A VoIP push APNs can't deliver before this expires is dropped rather
+    // than queued/redelivered arbitrarily late — important specifically
+    // here because iOS's PushKit contract requires every VoIP push that
+    // DOES arrive to be reported to CallKit unconditionally (Apple will
+    // revoke the entitlement for an app that silently swallows one), so
+    // staleness can only be handled at the delivery layer, never by the
+    // client choosing not to ring. node-apn defaults to expiry 0 ("attempt
+    // now, don't store"), which already prevents a truly offline device
+    // from receiving a stale ring on reconnect; this makes that default
+    // explicit and configurable rather than relying on an unstated default.
+    if (opts?.expiresInSeconds != null) {
+      notification.expiry = Math.floor(Date.now() / 1000) + opts.expiresInSeconds;
+    }
     // VoIP payloads are data-only — no aps.alert/sound/badge.
     notification.payload = data;
 

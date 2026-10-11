@@ -40,6 +40,9 @@ export const MESSAGE_KINDS = Object.values(MessageKind) as MessageKindValue[];
 export interface SocketPrincipal {
   userId: string
   username?: string
+  /** Real phone number only (never a placeholder one) — identity fallback
+   * when there's no display_name/username/email. See AuthPrincipal. */
+  phone?: string
   deviceId?: string
   scopes?: string[]
   token?: string

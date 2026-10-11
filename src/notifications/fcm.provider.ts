@@ -77,10 +77,23 @@ class FcmPushProvider implements PushProvider {
     // would show a redundant tray notification alongside it. Every other
     // push type keeps the `notification` block for normal OS display.
     const isIncomingCall = data.type === 'incoming_call'
+    const android: Record<string, unknown> = { priority: 'high' }
+    const apns: Record<string, unknown> = {}
+    if (msg.expiresInSeconds != null) {
+      // Android: milliseconds. iOS (FCM's own APNs relay, used when a
+      // device has no VoIP token registered yet): a Unix-epoch-seconds
+      // string in the apns-expiration header — FCM does not translate
+      // expiresInSeconds to APNs itself.
+      android.ttl = msg.expiresInSeconds * 1000
+      apns.headers = {
+        'apns-expiration': String(Math.floor(Date.now() / 1000) + msg.expiresInSeconds),
+      }
+    }
     const payload: Record<string, unknown> = {
       tokens,
       data: isIncomingCall ? { ...data, title: msg.title, body: msg.body } : data,
-      android: { priority: 'high' },
+      android,
+      ...(Object.keys(apns).length ? { apns } : {}),
     }
     if (!isIncomingCall) {
       payload.notification = {

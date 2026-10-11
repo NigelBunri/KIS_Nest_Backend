@@ -10,12 +10,15 @@ import {
   CallSession,
   CallSessionDocument,
   CallSignalEvent,
+  CallStatus,
 } from './schemas/call-session.schema'
 
 type UpsertCallArgs = {
   conversationId: string
   callId: string
   createdBy: string
+  createdByDisplayName?: string
+  createdByPhone?: string
   callType?: string
   media?: string
   inviteeUserIds?: string[]
@@ -35,6 +38,7 @@ type NotificationsServiceRef = {
     toUserId: string
     fromUserId: string
     fromDisplayName?: string
+    fromPhone?: string
     conversationId: string
     callId: string
     callType?: string
@@ -369,6 +373,8 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
         conversationId: args.conversationId,
         callId: args.callId,
         createdBy: String(args.createdBy),
+        createdByDisplayName: args.createdByDisplayName ?? null,
+        createdByPhone: args.createdByPhone ?? null,
         status: 'ringing',
         startedAt: now,
         endedAt: null,
@@ -493,29 +499,92 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const call = await this.calls.findOne({ conversationId, callId }).lean()
     if (!call) return null
 
-    const anyJoined = call.participants.some((p) => p.status === 'joined')
-    const normalizedReason = String(reason ?? '').trim().toLowerCase()
-    const terminalStatus =
-      !anyJoined &&
-      call.status === 'ringing' &&
-      ['cancelled', 'canceled', 'missed', 'rejected', 'busy', 'no_answer'].includes(normalizedReason)
-        ? 'missed'
-        : 'ended'
+    // Already terminal — a concurrent writer (the stale-ringing reaper in
+    // cleanupStaleCalls, or a duplicate/retried call.end for this callId)
+    // already closed this call out. Still record this participant's own
+    // exit for history, but don't re-transition the call or re-fire
+    // missed-call notifications: whichever write actually performed the
+    // transition already claimed that responsibility (see the CAS below).
+    if (call.status === 'ended' || call.status === 'missed') {
+      await this.setParticipantStatus(conversationId, callId, endedByUserId, 'left', reason)
+      return this.calls.findOne({ conversationId, callId }).lean()
+    }
 
-    await this.calls.updateOne(
-      { conversationId, callId, status: { $ne: 'ended' } },
-      {
-        $set: {
-          status: terminalStatus,
-          endedAt: now,
-          isActiveInConversation: false,
-        },
-      },
-    )
+    // Authoritative classification: a call nobody ever joined, ending while
+    // still 'ringing', is a missed call for every invitee still invited/
+    // connecting — independent of the free-text `reason` the client sent.
+    // This is deliberately NOT a reason-string whitelist: the mobile app
+    // has several distinct code paths that end an unanswered call (an
+    // explicit cancel via endCallForAll, a decline, the client-side ring
+    // timeout), and they don't all send the same reason string (e.g.
+    // endCallForAll sends 'ended_by_host' even when used to cancel an
+    // outgoing call nobody has joined yet). A whitelist here previously
+    // caused caller-cancel to silently produce no missed-call push at all
+    // for any reason string it didn't happen to recognize. Participant
+    // state — was anyone ever actually joined — is the only reliable
+    // signal for "was this call missed".
+    const anyJoined = call.participants.some((p) => p.status === 'joined')
+    const terminalStatus: CallStatus = !anyJoined && call.status === 'ringing' ? 'missed' : 'ended'
+
+    // Compare-and-swap on the status just read — guards the same race
+    // cleanupStaleCalls' own updateOne guards against: if a concurrent
+    // writer (the reaper, or a duplicate call.end) already moved this
+    // call's status since the read above, this matches nothing and
+    // `updated` is null, so this invocation must not notify (whichever
+    // write actually won already did, or will).
+    const updated = await this.calls
+      .findOneAndUpdate(
+        { conversationId, callId, status: call.status },
+        { $set: { status: terminalStatus, endedAt: now, isActiveInConversation: false } },
+        { new: true },
+      )
+      .lean()
 
     await this.setParticipantStatus(conversationId, callId, endedByUserId, 'left', reason)
 
-    return this.calls.findOne({ conversationId, callId }).lean()
+    if (!updated) {
+      // Lost the race. Return current state without notifying — the
+      // winning writer already claimed (or will claim) that job.
+      return this.calls.findOne({ conversationId, callId }).lean()
+    }
+
+    // Deliberately NOT gated on terminalStatus === 'missed': that call-level
+    // classification answers "did anyone ever join this call" (controls the
+    // persisted status / call-history badge), which is a different question
+    // from "did THIS specific invitee ever answer" in a group call. A group
+    // call where one invitee joined and two never answered is correctly
+    // classified 'ended' overall (someone WAS reached), but the two who
+    // were never answered still each get their own missed-call push.
+    if (this._notificationsService) {
+      const unanswered = updated.participants.filter(
+        (p) =>
+          p.userId !== endedByUserId &&
+          // The call's own creator is tracked as a participant with status
+          // 'connecting' from the moment they place the call, and nothing
+          // ever transitions it to 'joined' (there's no "the caller
+          // answered their own call" event) — so without this exclusion, a
+          // creator who ends their own live, fully-answered 1:1 call would
+          // match the invited/connecting filter below and get a "missed
+          // call" push about the call they just made themselves.
+          p.userId !== updated.createdBy &&
+          (p.status === 'invited' || p.status === 'connecting'),
+      )
+      for (const p of unanswered) {
+        this._notificationsService
+          .notifyMissedCall({
+            toUserId: p.userId,
+            fromUserId: updated.createdBy,
+            fromDisplayName: (updated as any).createdByDisplayName ?? undefined,
+            fromPhone: (updated as any).createdByPhone ?? undefined,
+            conversationId,
+            callId,
+            callType: updated.callType,
+          })
+          .catch(() => {})
+      }
+    }
+
+    return updated
   }
 
   async getCallCreator(conversationId: string, callId: string): Promise<string | null> {
@@ -556,15 +625,23 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
 
   async endIfNoActiveParticipants(conversationId: string, callId: string): Promise<void> {
     const call = await this.getCall(conversationId, callId)
-    if (!call || call.status === 'ended') return
+    if (!call || call.status === 'ended' || call.status === 'missed') return
 
     const anyStillIn =
       call.participants.some((p) => p.status === 'joined' || p.status === 'connecting' || p.status === 'invited')
 
     if (!anyStillIn) {
+      // Same classification rule as endCall(): nobody ever joined this
+      // call → it was missed, not merely "ended", even though every
+      // invitee got there by declining/busy rather than an explicit
+      // cancel. No one is left in invited/connecting state at this point
+      // (that's this branch's own precondition), so there's no remaining
+      // invitee to push a missed-call notification to here.
+      const anyJoined = call.participants.some((p) => p.status === 'joined')
+      const terminalStatus: CallStatus = !anyJoined && call.status === 'ringing' ? 'missed' : 'ended'
       await this.calls.updateOne(
-        { conversationId, callId },
-        { $set: { status: 'ended', endedAt: new Date(), isActiveInConversation: false } },
+        { conversationId, callId, status: call.status },
+        { $set: { status: terminalStatus, endedAt: new Date(), isActiveInConversation: false } },
       )
     }
   }
@@ -837,12 +914,26 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[calls] cleanup: ringing timeout callId=${call.callId}`)
       if (this._notificationsService) {
         const unanswered = call.participants.filter(
-          (p) => p.status === 'invited' || p.status === 'connecting',
+          // Exclude the call's own creator — see the identical exclusion
+          // (and its full rationale) in endCall(). Without it, a 1:1 call
+          // nobody answered would notify the CALLER that they missed their
+          // own outgoing call, since the creator's participant row is
+          // permanently 'connecting' and otherwise matches this filter too.
+          (p) => p.userId !== call.createdBy && (p.status === 'invited' || p.status === 'connecting'),
         )
         for (const p of unanswered) {
           this._notificationsService.notifyMissedCall({
             toUserId: p.userId,
             fromUserId: call.createdBy,
+            // The ring-timeout path (every call nobody answered in 90s —
+            // the single most common "missed call" scenario) previously
+            // omitted the caller's identity entirely, so this push always
+            // fell through notifyMissedCall's own fallback. Captured once
+            // at call.offer time (see createCallOrThrowIfActiveInConversation)
+            // since the caller is typically long gone from any live socket
+            // by the time this reaper tick runs.
+            fromDisplayName: (call as any).createdByDisplayName ?? undefined,
+            fromPhone: (call as any).createdByPhone ?? undefined,
             conversationId: call.conversationId,
             callId: call.callId,
             callType: call.callType,

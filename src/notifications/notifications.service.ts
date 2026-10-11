@@ -7,6 +7,19 @@ import { DummyPushProvider, PushMessage, PushProvider } from './push.provider';
 
 export type PushTarget = { userId: string; deviceTokens?: string[] };
 
+// Never return fromUserId (a raw Mongo/Django id) — a notification title/
+// body is user-facing text, not a debug log. Each tier is tried only if the
+// previous one is empty, so a caller who never set a display name but has a
+// phone on file still shows something a human recognizes, and a caller with
+// neither still gets a neutral, non-identifying label rather than their id.
+function resolveCallerLabel(fromDisplayName?: string, fromPhone?: string): string {
+  const displayName = (fromDisplayName ?? '').trim();
+  if (displayName) return displayName;
+  const phone = (fromPhone ?? '').trim();
+  if (phone) return phone;
+  return 'KIS user';
+}
+
 function isInQuietHours(dnd: { start?: string; end?: string }): boolean {
   const now = new Date()
   const hhmm = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`
@@ -124,6 +137,7 @@ export class NotificationsService implements OnModuleInit {
     toUserId: string;
     fromUserId: string;
     fromDisplayName?: string
+    fromPhone?: string
     conversationId: string;
     callId: string;
     callType?: string;
@@ -138,8 +152,22 @@ export class NotificationsService implements OnModuleInit {
       return { ok: true, delivered: 0, skipped: 'dnd' };
     }
 
-    const callerLabel = input.fromDisplayName || input.fromUserId;
+    const callerLabel = resolveCallerLabel(input.fromDisplayName, input.fromPhone);
     const callLabel = input.title || (input.callType ? `${input.callType} call` : 'call');
+    // Carried in the payload so the receiving device can tell "just
+    // delivered" apart from "this sat in a provider's queue while the
+    // device was offline and only arrived now, long after the call ended".
+    // Ringing never depends on this alone — see expiresInSeconds below for
+    // the real guarantee — but it lets the client skip displaying a UI for
+    // a push it can tell is already stale on arrival.
+    const sentAtMs = Date.now();
+    // Matches the 90s server-side ring timeout (cleanupStaleCalls) with a
+    // safety margin: once a call has had time to ring out and be marked
+    // missed server-side, a push that still hasn't been delivered has
+    // nothing useful left to wake the device for. Short-TTL push for a
+    // time-boxed "ring now" action is standard practice (this is what
+    // keeps a flaky connection from delivering a call push an hour late).
+    const expiresInSeconds = 60;
 
     // iOS: prefer a real PushKit VoIP push so CallKit can wake the app and
     // ring even when it's fully killed. Payload keys must match exactly what
@@ -155,7 +183,8 @@ export class NotificationsService implements OnModuleInit {
             conversationId: input.conversationId,
             fromUserId: input.fromUserId,
             type: 'incoming_call',
-          });
+            sentAt: String(sentAtMs),
+          }, { expiresInSeconds });
           if (res.failedTokens.length) {
             await this.tokens.bulkDeactivate(res.failedTokens).catch(() => null);
           }
@@ -181,7 +210,17 @@ export class NotificationsService implements OnModuleInit {
           callType: input.callType ?? 'voice',
           fromUserId: input.fromUserId,
           type: 'incoming_call',
+          sentAt: String(sentAtMs),
+          // Incoming-call pushes are data-only (see fcm.provider.ts) — the
+          // client renders its own CallKit/ConnectionService UI instead of
+          // an OS notification, reading the caller's name straight out of
+          // this field (handleBackgroundPushMessage reads
+          // data.callerName first). Without it here, Android's background
+          // ring UI fell back to the generic "Incoming {type} call" title
+          // instead of the caller's actual name/phone.
+          callerName: callerLabel,
         },
+        expiresInSeconds,
       },
       { retryOnTransientFailure: true },
     );
@@ -191,6 +230,7 @@ export class NotificationsService implements OnModuleInit {
     toUserId: string;
     fromUserId: string;
     fromDisplayName?: string;
+    fromPhone?: string;
     conversationId: string;
     callId: string;
     callType?: string;
@@ -200,7 +240,7 @@ export class NotificationsService implements OnModuleInit {
       return { ok: true, delivered: 0, skipped: 'muted_category' };
     }
 
-    const callerLabel = input.fromDisplayName || input.fromUserId;
+    const callerLabel = resolveCallerLabel(input.fromDisplayName, input.fromPhone);
     return this.notify(
       { userId: input.toUserId },
       {

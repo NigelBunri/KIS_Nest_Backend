@@ -48,6 +48,7 @@ export interface CallsDeps {
       toUserId: string
       fromUserId: string
       fromDisplayName?: string
+      fromPhone?: string
       conversationId: string
       callId: string
       callType?: string
@@ -57,6 +58,7 @@ export interface CallsDeps {
       toUserId: string
       fromUserId: string
       fromDisplayName?: string
+      fromPhone?: string
       conversationId: string
       callId: string
       callType?: string
@@ -67,6 +69,8 @@ export interface CallsDeps {
       conversationId: string
       callId: string
       createdBy: string
+      createdByDisplayName?: string
+      createdByPhone?: string
       callType?: string
       media?: string
       inviteeUserIds?: string[]
@@ -338,6 +342,8 @@ function createCallHandler(
               conversationId,
               callId,
               createdBy: principal.userId,
+              createdByDisplayName: principal.username,
+              createdByPhone: principal.phone,
               callType,
               media,
               inviteeUserIds: offerInviteeIds,
@@ -559,6 +565,7 @@ function createCallHandler(
               toUserId: uid,
               fromUserId: principal.userId,
               fromDisplayName: principal.username,
+              fromPhone: principal.phone,
               conversationId,
               callId,
               callType,
@@ -570,27 +577,17 @@ function createCallHandler(
         server.in(rooms.userRoom(principal.userId)).socketsJoin(rooms.convRoom(conversationId))
       }
 
-      // call.end with rejected/busy/no_answer: notify invitees they missed the call
-      if (event === EVT.CALL_END && deps.notificationsService) {
-        const reason = typeof payload?.reason === 'string' ? payload.reason : ''
-        if (['rejected', 'busy', 'no_answer', 'missed', 'cancelled'].includes(reason) && callId) {
-          const missedCall = await deps.callsService?.getCall?.(conversationId, callId).catch(() => null)
-          if (missedCall) {
-            const unanswered = missedCall.participants.filter(
-              (p: any) => p.userId !== principal.userId && (p.status === 'invited' || p.status === 'connecting'),
-            )
-            for (const p of unanswered) {
-              deps.notificationsService.notifyMissedCall({
-                toUserId: p.userId,
-                fromUserId: missedCall.createdBy,
-                conversationId,
-                callId,
-                callType: missedCall.callType,
-              }).catch(() => {})
-            }
-          }
-        }
-      }
+      // call.end missed-call notifications are now sent from inside
+      // CallsService.endCall() itself (see calls.service.ts), gated on the
+      // call's own authoritative status transition to 'missed' rather than
+      // matching the client's free-text `reason` string here. The reason-
+      // string whitelist that used to live in this handler silently
+      // dropped the notification for any caller-cancel path whose reason
+      // didn't happen to match exactly (e.g. endCallForAll's
+      // 'ended_by_host') — centralizing in the service, right where the
+      // state transition itself is persisted, removes that whole class of
+      // mismatch and gives a single idempotent claim point shared with the
+      // stale-ringing reaper (cleanupStaleCalls).
 
       // call.answer: make sure the answer reaches the caller even if they
       // navigated away from the chat while waiting.
@@ -1680,6 +1677,7 @@ function registerInviteHandler(server: Server, socket: Socket, deps: CallsDeps) 
             toUserId: uid,
             fromUserId: principal.userId,
             fromDisplayName: principal.username,
+            fromPhone: principal.phone,
             conversationId,
             callId,
             callType: callData.callType,

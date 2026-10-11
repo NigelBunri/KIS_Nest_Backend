@@ -7,6 +7,10 @@ import { signedInternalHeaders } from '../security/internal-signing';
 export type AuthPrincipal = {
   userId: string;
   username: string;
+  /** Real phone number only (never a placeholder/synthetic one) — used as
+   * a display-identity fallback (e.g. caller ID on a missed-call push)
+   * when there's no display_name/username/email to show. */
+  phone?: string;
   isPremium: boolean;
   deviceId?: string;
   scopes?: string[];
@@ -209,10 +213,12 @@ export class DjangoAuthService {
         : [];
 
     const deviceId = data?.device_id ?? data?.deviceId ?? undefined;
+    const phone = String(data?.phone ?? '').trim() || undefined;
 
     return {
       userId,
       username,
+      phone,
       isPremium,
       deviceId: deviceId ? String(deviceId) : undefined,
       scopes,
