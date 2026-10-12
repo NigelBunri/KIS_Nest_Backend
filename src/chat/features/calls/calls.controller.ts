@@ -17,6 +17,8 @@ import { DjangoAuthService } from '../../../auth/django-auth.service'
 import { DjangoConversationClient } from '../../integrations/django/django-conversation.client'
 import { RateLimitService } from '../../infra/rate-limit/rate-limit.service'
 import type { AuthPrincipal } from '../../../auth/django-auth.service'
+import { ChatGateway } from '../../../realtime/chat.gateway'
+import { EVT, rooms } from '../../chat.types'
 
 @Controller('calls')
 export class CallsController {
@@ -25,6 +27,7 @@ export class CallsController {
     private readonly authService: DjangoAuthService,
     private readonly djangoConversationClient: DjangoConversationClient,
     private readonly rateLimit: RateLimitService,
+    private readonly chatGateway: ChatGateway,
   ) {}
 
   // Standalone calls (`standalone:<callId>`) have no Django conversation
@@ -317,6 +320,99 @@ export class CallsController {
         // socket handler, or the call_id may refer to a gateway-side UUID.
       }
     }
+    // Returns 204 No Content implicitly (HttpCode decorator).
+  }
+
+  /**
+   * POST /calls/:callId/ringing-ack - a genuine recipient-device
+   * acknowledgement, for the one path the existing socket-based
+   * `call.ringing` event (realtime/handlers/calls.ts) cannot reach: a
+   * recipient whose app is fully backgrounded/killed is woken by an FCM
+   * push into a headless JS context with NO live socket connection to
+   * emit anything over. The mobile client's background push handler calls
+   * this plain HTTP endpoint instead, once it has actually registered the
+   * call with the OS and shown the incoming-call notification — i.e. this
+   * device really is alerting the user, not merely "the push provider
+   * accepted the send request" (which proves nothing about whether the
+   * device ever received or presented it).
+   *
+   * Mirrors the socket handler's own logic exactly (creator lookup +
+   * targeted call.ringing emit, best-effort/non-fatal on a miss) so the
+   * caller's EXISTING `call.ringing` listener handles both paths
+   * identically with no caller-side changes at all.
+   */
+  @Post(':callId/ringing-ack')
+  @HttpCode(204)
+  async ackRinging(
+    @Req() req: FastifyRequest,
+    @Param('callId') callId: string,
+    @Body() body: { conversation_id?: string },
+  ) {
+    const principal = await this.resolveUser(req)
+    if (!body.conversation_id) throw new BadRequestException('conversation_id required')
+    await this.assertConversationMember(principal, body.conversation_id)
+
+    const creator = await this.callsService
+      .getCallCreator(body.conversation_id, callId)
+      .catch(() => null)
+    // Best-effort — never fails the call for either side on a miss (a
+    // stale/already-ended call, or the creator answering their own ack).
+    if (creator && creator !== principal.userId) {
+      this.chatGateway.server.to(rooms.userRoom(creator)).emit(EVT.CALL_RINGING, {
+        conversationId: body.conversation_id,
+        callId,
+        fromUserId: principal.userId,
+        ringingAt: new Date().toISOString(),
+      })
+    }
+    // Returns 204 No Content implicitly (HttpCode decorator).
+  }
+
+  /**
+   * POST /calls/:callId/decline - lets the mobile app's Notifee background
+   * action handler (see incomingCallNotification.ts's Decline action)
+   * decline a call with NO live socket connection and NO need to ever
+   * bring the app to the foreground — the one interaction a notification
+   * action button must support entirely in the background. Mirrors the
+   * socket call.end handler's own 'rejected' branch exactly
+   * (setParticipantStatus + endIfNoActiveParticipants, not a blanket
+   * endCall — a decline in a GROUP call must not end it for everyone else
+   * who's still connected), then broadcasts the same call.end event shape
+   * the caller's existing socket listener already handles, so no
+   * caller-side change was needed for this to work.
+   */
+  @Post(':callId/decline')
+  @HttpCode(204)
+  async decline(
+    @Req() req: FastifyRequest,
+    @Param('callId') callId: string,
+    @Body() body: { conversation_id?: string },
+  ) {
+    const principal = await this.resolveUser(req)
+    if (!body.conversation_id) throw new BadRequestException('conversation_id required')
+    await this.assertConversationMember(principal, body.conversation_id)
+
+    const existed = await this.callsService.ensureCallExistsOrThrow(body.conversation_id, callId).catch(() => null)
+    if (!existed) return // already gone (ended/expired) — nothing to decline, not an error
+
+    await this.callsService.setParticipantStatus(
+      body.conversation_id,
+      callId,
+      principal.userId,
+      'rejected',
+      'rejected',
+    )
+    await this.callsService.endIfNoActiveParticipants(body.conversation_id, callId)
+
+    const endedAt = new Date().toISOString()
+    this.chatGateway.server.to(rooms.convRoom(body.conversation_id)).emit(EVT.CALL_END, {
+      callId,
+      conversationId: body.conversation_id,
+      fromUserId: principal.userId,
+      endedBy: principal.userId,
+      endedAt,
+      reason: 'rejected',
+    })
     // Returns 204 No Content implicitly (HttpCode decorator).
   }
 }

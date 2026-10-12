@@ -295,6 +295,15 @@ function createCallHandler(
         conversationId,
         fromUserId: principal.userId,
         deviceId: principal.deviceId ?? null,
+        // Authoritatively overrides whatever (if anything) the client sent,
+        // exactly like fromUserId above — never trust a client-supplied
+        // display name for who performed this action. This was previously
+        // missing entirely for CALL_ANSWER: none of the mobile client's
+        // call.answer emits include a displayName field at all, so the
+        // caller's side permanently fell back to a generic "Participant"
+        // label for whoever just answered, instead of their real name.
+        displayName: principal.username,
+        fromPhone: principal.phone,
       }
 
       // Collect invitee IDs for CALL_OFFER — needed for routing below
@@ -431,6 +440,11 @@ function createCallHandler(
             callId,
             conversationId,
             userId: principal.userId,
+            // Was missing entirely — every joiner showed as a generic
+            // "Participant" on everyone else's screen instead of their real
+            // name. Authoritative (the joining user's own principal), same
+            // as createCallHandler's enrichedPayload.displayName above.
+            displayName: principal.username,
             joinedAt: enrichedPayload.acceptedAt,
           })
           // For broadcast calls: audience members bump the viewer count
@@ -753,6 +767,7 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
           callId,
           conversationId,
           userId: principal.userId,
+          displayName: principal.username,
           rejoined: true,
           joinedAt: new Date().toISOString(),
         })
