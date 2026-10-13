@@ -31,6 +31,7 @@ const MESSAGE_CONTENT_FIELDS_UNSET = {
   bibleGameStats: '',
   bibleDiscipleshipStats: '',
   linkPreview: '',
+  statusContext: '',
   previewText: '',
   ciphertext: '',
   encryptionMeta: '',
@@ -144,6 +145,7 @@ export class MessagesService {
       replyToId: input.replyToId,
 
       callEvent: (input as any).callEvent,
+      statusContext: (input as any).statusContext,
 
       previewText,
     })

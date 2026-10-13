@@ -378,6 +378,23 @@ export class Message {
   @Prop()
   replyToId?: string;
 
+  /** Present only on a message created from a status reply/reaction (see
+   * apps.statuses.views on the Django side and internal.controller.ts's
+   * sendMessageAsUser) - a point-in-time snapshot of the status being
+   * replied/reacted to, so the receiver's chat bubble can show what the
+   * message was actually about instead of a bare, context-free text/emoji.
+   * Not a live reference: the underlying status can expire/delete
+   * independently of this snapshot. */
+  @Prop({ type: Object })
+  statusContext?: {
+    statusId: string;
+    statusType: 'image' | 'video' | 'audio' | 'text' | 'document';
+    isReaction: boolean;
+    previewText?: string;
+    previewUrl?: string | null;
+    previewStyle?: Record<string, any> | null;
+  };
+
   @Prop({ default: false })
   isEdited!: boolean;
 

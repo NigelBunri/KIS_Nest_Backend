@@ -65,7 +65,14 @@ export class RealtimeInternalController {
   // than silently claimed as full parity with a live chat send.
   @Post('messages/send-as-user')
   async sendMessageAsUser(
-    @Body() body: { conversationId?: string; senderId?: string; text?: string; clientId?: string },
+    @Body()
+    body: {
+      conversationId?: string
+      senderId?: string
+      text?: string
+      clientId?: string
+      statusContext?: Record<string, any>
+    },
   ) {
     const conversationId = String(body?.conversationId || '').trim()
     const senderId = String(body?.senderId || '').trim()
@@ -76,12 +83,14 @@ export class RealtimeInternalController {
 
     const clientId = String(body?.clientId || '').trim() || randomUUID()
     const seq = await this.seqClient.allocateSeq(conversationId)
+    const statusContext =
+      body?.statusContext && typeof body.statusContext === 'object' ? body.statusContext : undefined
     const created = await this.messagesService.createIdempotent({
       senderId,
       conversationId,
       clientId,
       seq,
-      input: { conversationId, clientId, kind: MessageKind.TEXT, text },
+      input: { conversationId, clientId, kind: MessageKind.TEXT, text, statusContext } as any,
     })
 
     const createdDto = (created as any).dto ?? created
@@ -89,8 +98,11 @@ export class RealtimeInternalController {
       this.gateway.server?.to(rooms.convRoom(conversationId)).emit(EVT.MESSAGE, createdDto)
     } catch {}
 
+    const preview = statusContext
+      ? `${statusContext.isReaction ? 'Reacted' : 'Replied'} to your status: ${text}`
+      : text
     await this.conversationClient
-      .updateLastMessage({ conversationId, createdAt: created.createdAt, preview: text })
+      .updateLastMessage({ conversationId, createdAt: created.createdAt, preview })
       .catch(() => {})
 
     return {
