@@ -82,6 +82,34 @@ export class MessagesService {
   /**
    * ✅ Legacy implementation (your DB write path)
    */
+  // AND-263: "numbered badge trips, may indicate 2 unread when there's just
+  // 1 unread". createIdempotentLegacy below already dedupes a retried send
+  // (same clientId — e.g. after a socket reconnect resent an unacked
+  // message) by returning the EXISTING message instead of creating a
+  // second one. But the realtime handler (realtime/handlers/messages.ts)
+  // calls djangoSeqClient.allocateSeq() — which atomically increments
+  // Conversation.last_message_seq server-side — BEFORE calling
+  // createIdempotent at all, with no way to undo that increment once the
+  // dedupe check downstream discovers the message already exists. That
+  // orphaned, permanent gap between last_message_seq and the actual
+  // number of persisted messages directly inflates every recipient's
+  // unread count (badge_counts.py computes unread as
+  // last_message_seq - last_read_seq), since the backend badge formula has
+  // no way to distinguish "real new message" from "wasted seq from a
+  // retry". Exposed so the handler can check for an existing message BY
+  // clientId and skip seq allocation entirely on a genuine retry, rather
+  // than discovering the duplicate only after already paying for a seq.
+  async findByClientId(conversationId: string, clientId: string): Promise<{
+    id: string
+    seq: number
+    createdAt: Date
+  } | null> {
+    const doc = await this.messageModel.findOne({ conversationId, clientId })
+    if (!doc) return null
+    const id = (doc as any).id ?? (doc as any)._id?.toString?.() ?? String((doc as any)._id)
+    return { id, seq: doc.seq, createdAt: (doc as any).createdAt ?? new Date() }
+  }
+
   async createIdempotentLegacy(params: {
     senderId: string
     senderDeviceId?: string
@@ -215,7 +243,17 @@ export class MessagesService {
     // If you have a mapper, plug it here. For now, emit doc as DTO.
     const dto = doc
 
-    return { id, seq: args.seq, createdAt, dto, reused }
+    // AND-263: on a reused (duplicate-clientId) message, args.seq is the
+    // NEW seq this call's caller just allocated — not the existing
+    // message's real, original seq, which is what doc.seq already holds.
+    // Reporting args.seq here would ack the client with a seq number that
+    // belongs to no actual message in this conversation, visible as a
+    // gap/jump in their own last-seen sequence. The caller (the realtime
+    // send handler) is the real fix — it should never reach this far
+    // without already having checked findByClientId — but keep this
+    // correct on its own terms too, rather than relying solely on the
+    // caller never making that mistake.
+    return { id, seq: reused ? doc.seq : args.seq, createdAt, dto, reused }
   }
 
   /* ==========================================================================

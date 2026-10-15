@@ -167,6 +167,18 @@ export interface MessagesDeps {
     allocate?: (conversationId: string) => Promise<number>
   }
   messagesService: {
+    // AND-263: lets the send handler check for an already-persisted
+    // message by clientId BEFORE allocating a seq, so a genuine retry
+    // (same clientId, e.g. after a socket reconnect resent an unacked
+    // send) never wastes a seq allocation at all, rather than discovering
+    // the duplicate only after djangoSeqClient.allocateSeq() already
+    // incremented Conversation.last_message_seq with no way to undo it.
+    findByClientId(conversationId: string, clientId: string): Promise<{
+      id: string
+      seq: number
+      createdAt: Date
+    } | null>
+
     // idempotent create with rich payload
     createIdempotent(args: {
       senderId: string
@@ -265,6 +277,33 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         payload?.encryptionMeta ||
         payload?.encrypted
       )
+
+      // AND-263: a genuine retry (same clientId — e.g. the client resent
+      // an unacked message after a socket reconnect) used to still run
+      // djangoSeqClient.allocateSeq() below, which atomically and
+      // PERMANENTLY increments Conversation.last_message_seq server-side,
+      // before createIdempotent's own dedupe check ever got a chance to
+      // say "this message already exists." That orphaned seq gap directly
+      // inflated every recipient's unread badge count (badge_counts.py:
+      // last_message_seq - last_read_seq) by one for every retried send,
+      // with no way to ever correct it after the fact. Checking here,
+      // before any of that, means a real retry costs nothing - no wasted
+      // seq, no duplicate broadcast, no duplicate push/webhook dispatch.
+      if (clientId) {
+        stage = 'send.check_duplicate'
+        const existing = await deps.messagesService.findByClientId(conversationId, clientId)
+        if (existing) {
+          safeAck(ack, ok({
+            ack: {
+              clientId,
+              serverId: existing.id,
+              seq: existing.seq,
+              createdAt: existing.createdAt.toISOString(),
+            },
+          }))
+          return
+        }
+      }
 
       stage = 'send.rate_limit'
       await deps.rateLimitService.assert(principal, `send:${conversationId}`, 50)
