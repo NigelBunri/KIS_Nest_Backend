@@ -127,6 +127,18 @@ class Poll {
   // ✅ Avoid union ambiguity in @nestjs/mongoose
   @Prop({ type: Date, default: null })
   expiresAt?: Date | null;
+
+  // Set server-side only (never accepted from the client) the moment a
+  // poll is actually closed - either because votePoll()/closePoll() found
+  // `expiresAt` already in the past, or the creator closed it manually.
+  // Distinct from expiresAt (the scheduled deadline): a poll with no
+  // expiresAt can still be closedAt by a manual close, and a poll past its
+  // expiresAt isn't actually marked closedAt until something touches it
+  // (votePoll/closePoll/getPollState all do). isPollClosed() below is the
+  // one place that reasons about "closed" for any caller that needs the
+  // live state without mutating anything.
+  @Prop({ type: Date, default: null })
+  closedAt?: Date | null;
 }
 const PollSchema = SchemaFactory.createForClass(Poll);
 

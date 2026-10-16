@@ -738,6 +738,57 @@ export class MessagesService {
    * VALIDATION + PREVIEW
    * ========================================================================== */
 
+  // Poll real-time fix (requirement 1E): client-side validation alone is
+  // never sufficient - a hand-crafted socket payload or a replayed/edited
+  // request must be rejected here regardless of what the mobile app's own
+  // PollModal already checked.
+  private assertValidPollPayload(poll: any) {
+    if (!Array.isArray(poll?.options) || poll.options.length < 2) {
+      throw new BadRequestException('poll requires at least 2 options')
+    }
+    const seenIds = new Set<string>()
+    for (const opt of poll.options) {
+      if (typeof opt?.id !== 'string' || !opt.id.trim()) {
+        throw new BadRequestException('every poll option requires an id')
+      }
+      if (seenIds.has(opt.id)) throw new BadRequestException(`duplicate poll option id: ${opt.id}`)
+      seenIds.add(opt.id)
+      if (typeof opt?.text !== 'string' || !opt.text.trim()) {
+        throw new BadRequestException('every poll option requires text')
+      }
+    }
+    if (poll.expiresAt != null) {
+      const expires = new Date(poll.expiresAt)
+      if (Number.isNaN(expires.getTime())) {
+        throw new BadRequestException('poll expiresAt must be a valid date')
+      }
+      if (expires.getTime() <= Date.now()) {
+        throw new BadRequestException('poll closing time must be in the future')
+      }
+    }
+  }
+
+  // Event date/time fix (requirement 2B): re-validates what the mobile
+  // date/time pickers already enforce - a same-day event's end must be
+  // after its start, multi-day events are allowed (endsAt's DATE is never
+  // forced to match startsAt's), and both must be real, parseable
+  // timestamps rather than whatever string a client happens to send.
+  private assertValidEventPayload(event: any) {
+    const starts = new Date(event?.startsAt)
+    if (Number.isNaN(starts.getTime())) {
+      throw new BadRequestException('event startsAt must be a valid date')
+    }
+    if (event?.endsAt != null) {
+      const ends = new Date(event.endsAt)
+      if (Number.isNaN(ends.getTime())) {
+        throw new BadRequestException('event endsAt must be a valid date')
+      }
+      if (ends.getTime() <= starts.getTime()) {
+        throw new BadRequestException('event end time must be after its start time')
+      }
+    }
+  }
+
   private assertKindPayloadConsistency(input: SendMessageDto) {
     const kind = input.kind as any
     const hasEncryptedPayload = !!((input as any).ciphertext || (input as any).encryptionMeta)
@@ -800,9 +851,11 @@ export class MessagesService {
         break
       case 'poll':
         if (!hasPoll) throw new BadRequestException('poll requires poll payload')
+        this.assertValidPollPayload(input.poll)
         break
       case 'event':
         if (!hasEvent) throw new BadRequestException('event requires event payload')
+        this.assertValidEventPayload((input as any).event)
         break
       case 'location':
         if (!hasLocation) throw new BadRequestException('location requires location payload')
@@ -902,6 +955,59 @@ export class MessagesService {
    * POLL VOTING
    * ========================================================================== */
 
+  // True once a poll is actually closed - either marked closedAt already,
+  // or its scheduled expiresAt deadline has passed. Pure computation, no
+  // write - callers that need the closure PERSISTED (so every future
+  // reader sees the same "closed since" timestamp instead of re-deriving
+  // it from expiresAt forever) call closePollIfExpired() below instead.
+  private isPollClosed(poll: any): boolean {
+    if (!poll) return false
+    if (poll.closedAt) return true
+    if (poll.expiresAt && new Date() >= new Date(poll.expiresAt)) return true
+    return false
+  }
+
+  // Lazily persists closedAt the first time anything (a vote attempt, a
+  // manual close, a future "poll detail" read) notices the deadline has
+  // passed - this is what satisfies "closure enforced even if no
+  // scheduled background task has run": there is deliberately no cron job
+  // here, every call path that touches a poll re-checks expiresAt against
+  // the current time itself rather than trusting a flag that might be
+  // stale. The `'poll.closedAt': null` filter makes this safe to call from
+  // multiple concurrent requests - whichever one actually performs the
+  // $set wins, everyone else's matching write is a no-op.
+  private async closePollIfExpired(messageId: string, poll: any): Promise<void> {
+    if (poll.closedAt) return
+    if (!poll.expiresAt || new Date() < new Date(poll.expiresAt)) return
+    await this.messageModel.updateOne(
+      { _id: messageId, 'poll.closedAt': null },
+      { $set: { 'poll.closedAt': poll.expiresAt } },
+    )
+  }
+
+  // Recomputes every option's `votes` from the authoritative `voters`
+  // array length, atomically, server-side - votes is never trusted or
+  // incremented directly from client input anywhere in this method; it is
+  // always a pure derivation of voters.length after the real mutation
+  // ($pull/$addToSet below) has already landed.
+  private async recomputePollVoteCounts(messageId: string): Promise<void> {
+    await this.messageModel.updateOne({ _id: messageId }, [
+      {
+        $set: {
+          'poll.options': {
+            $map: {
+              input: '$poll.options',
+              as: 'o',
+              in: {
+                $mergeObjects: ['$$o', { votes: { $size: { $ifNull: ['$$o.voters', []] } } }],
+              },
+            },
+          },
+        },
+      },
+    ] as any)
+  }
+
   async votePoll(args: {
     conversationId: string
     messageId: string
@@ -920,26 +1026,97 @@ export class MessagesService {
     const poll = (msg as any).poll
     if (!poll || !Array.isArray(poll.options)) throw new BadRequestException('poll data missing')
 
-    // Remove existing vote from any option first (de-vote + re-vote support)
-    for (const opt of poll.options) {
-      if (Array.isArray(opt.voters)) {
-        opt.voters = opt.voters.filter((v: string) => v !== args.userId)
-        opt.votes = opt.voters.length
-      }
+    if (this.isPollClosed(poll)) {
+      await this.closePollIfExpired(args.messageId, poll)
+      throw new BadRequestException('This poll is closed.')
     }
 
-    // Cast vote on the target option
     const target = poll.options.find((o: any) => o.id === args.optionId)
     if (!target) throw new BadRequestException(`option ${args.optionId} not found in poll`)
-    if (!Array.isArray(target.voters)) target.voters = []
-    if (!target.voters.includes(args.userId)) {
-      target.voters.push(args.userId)
-    }
-    target.votes = target.voters.length
 
-    ;(msg as any).markModified('poll')
-    await (msg as any).save()
-    return msg
+    // Every mutation below is a single atomic Mongo operation keyed off
+    // _id (+ an arrayFilter for the target option) - $pull/$addToSet are
+    // both idempotent, so two simultaneous votes (same or different users)
+    // can never stack a double-count or lose one voter's choice to the
+    // other's write, with no multi-document transaction needed since a
+    // poll's vote state lives entirely on this one message document.
+    const alreadyVotedTarget = Array.isArray(target.voters) && target.voters.includes(args.userId)
+
+    if (poll.allowMultiple) {
+      // Multi-select: each option toggles independently - voting never
+      // touches any option other than the one tapped.
+      if (alreadyVotedTarget) {
+        await this.messageModel.updateOne(
+          { _id: args.messageId },
+          { $pull: { 'poll.options.$[opt].voters': args.userId } },
+          { arrayFilters: [{ 'opt.id': args.optionId }] },
+        )
+      } else {
+        await this.messageModel.updateOne(
+          { _id: args.messageId },
+          { $addToSet: { 'poll.options.$[opt].voters': args.userId } },
+          { arrayFilters: [{ 'opt.id': args.optionId }] },
+        )
+      }
+    } else {
+      // Single-choice: always clear this voter from every option first,
+      // then always re-add to the target - re-tapping the same option is
+      // an idempotent no-op (matches the pre-existing, already-tested
+      // behavior), while tapping a different option moves the vote in one
+      // step. (Single-choice intentionally has no un-vote gesture - that
+      // only exists for allowMultiple, where each option is an independent
+      // checkbox.)
+      await this.messageModel.updateOne(
+        { _id: args.messageId },
+        { $pull: { 'poll.options.$[].voters': args.userId } },
+      )
+      await this.messageModel.updateOne(
+        { _id: args.messageId },
+        { $addToSet: { 'poll.options.$[opt].voters': args.userId } },
+        { arrayFilters: [{ 'opt.id': args.optionId }] },
+      )
+    }
+
+    await this.recomputePollVoteCounts(args.messageId)
+
+    const updated = await this.messageModel.findOne({ _id: args.messageId })
+    if (!updated) throw new NotFoundException('message not found')
+    return updated
+  }
+
+  // Manual close (AND poll real-time fix, requirement 1D): only the
+  // original poll creator may close it early. Idempotent - closing an
+  // already-closed poll just returns its current state rather than
+  // erroring, since two taps of "Close poll" (e.g. a slow network retry)
+  // should never surface as a failure to the creator.
+  async closePoll(args: {
+    conversationId: string
+    messageId: string
+    userId: string
+  }): Promise<MessageDocument> {
+    const msg = await this.messageModel.findOne({
+      _id: args.messageId,
+      conversationId: args.conversationId,
+    })
+    if (!msg) throw new NotFoundException('message not found')
+    if ((msg as any).kind !== 'poll') throw new BadRequestException('message is not a poll')
+    if (String((msg as any).senderId) !== String(args.userId)) {
+      throw new ForbiddenException('only the poll creator can close this poll')
+    }
+
+    const poll = (msg as any).poll
+    if (!poll) throw new BadRequestException('poll data missing')
+
+    if (!poll.closedAt) {
+      await this.messageModel.updateOne(
+        { _id: args.messageId, 'poll.closedAt': null },
+        { $set: { 'poll.closedAt': new Date() } },
+      )
+    }
+
+    const updated = await this.messageModel.findOne({ _id: args.messageId })
+    if (!updated) throw new NotFoundException('message not found')
+    return updated
   }
 
   /**

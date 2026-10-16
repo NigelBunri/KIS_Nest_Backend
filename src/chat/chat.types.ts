@@ -261,6 +261,7 @@ export const EVT = {
   // In-chat poll voting
   VOTE_POLL: 'chat.vote_poll',
   POLL_UPDATED: 'chat.poll_updated',
+  CLOSE_POLL: 'chat.close_poll',
 
   // Scheduled messages
   SCHEDULED_DELIVERED: 'chat.scheduled_delivered',
