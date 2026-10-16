@@ -5,6 +5,7 @@ import {
   ConnectedSocket,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
@@ -33,13 +34,14 @@ import { registerRealtimeHandlers } from './handlers';
 import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
 import { SfuService } from './sfu/sfu.service';
+import { ScheduledMessagesCron } from '../chat/features/scheduled-messages/scheduled-messages.cron';
 
 @WebSocketGateway({
   path: '/ws',
   cors: { origin: socketIoCorsOriginDelegate, credentials: true },
 })
 @UseGuards(WsAuthGuard)
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
   @WebSocketServer()
   server!: Server;
 
@@ -47,6 +49,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   constructor(
     private readonly djangoConversationClient: DjangoConversationClient,
+    private readonly scheduledMessagesCron: ScheduledMessagesCron,
     private readonly djangoSeqClient: DjangoSeqClient,
     private readonly rateLimitService: RateLimitService,
     private readonly messagesService: MessagesService,
@@ -64,6 +67,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly threadsService: ThreadsService,
     private readonly sfuService: SfuService,
   ) {}
+
+  afterInit(server: Server) {
+    // Previously never called at all, so ScheduledMessagesCron.server stayed
+    // undefined forever and deliverDueMessages() was a permanent no-op — see
+    // that class's doc comment.
+    this.scheduledMessagesCron.setServer(server);
+  }
 
   async handleConnection(@ConnectedSocket() socket: Socket) {
     let principal = (socket as any).principal as SocketPrincipal | undefined;

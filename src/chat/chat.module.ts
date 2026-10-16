@@ -60,6 +60,7 @@ import { NotificationsService } from '../notifications/notifications.service'
 import { CallStateModule } from './features/calls/call-state.module'
 
 import { ScheduledMessagesModule } from './features/scheduled-messages/scheduled-messages.module'
+import { ScheduledMessagesController } from './features/scheduled-messages/scheduled-messages.controller'
 import { SfuModule } from '../realtime/sfu/sfu.module'
 
 @Module({
@@ -116,6 +117,7 @@ import { SfuModule } from '../realtime/sfu/sfu.module'
     BroadcastCommentsController,
     E2eeController,
     RealtimeInternalController,
+    ScheduledMessagesController,
   ],
   providers: [
     ChatGateway,

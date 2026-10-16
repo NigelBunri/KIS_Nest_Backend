@@ -247,6 +247,118 @@ export interface MessagesDeps {
   }
 }
 
+/**
+ * Broadcasts a just-created message to its conversation room. `socket`, when
+ * given, also gets a direct self-echo so the sender sees their own message
+ * immediately even before their client has joined the room — used by the
+ * live EVT.SEND path. The scheduled-delivery cron (scheduled-messages.cron.ts)
+ * calls this without a socket, since there is no live sender connection to
+ * echo to; the sender picks the message up through the normal room broadcast
+ * (if connected) or the next history sync, exactly like a message sent from
+ * another of their own devices while this one was offline.
+ */
+export function broadcastCreatedMessage(
+  server: Server,
+  conversationId: string,
+  createdDto: any,
+  socket?: Socket,
+) {
+  safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, createdDto)
+  socket?.emit(EVT.MESSAGE, createdDto)
+}
+
+/**
+ * Everything that happens after a message is durably persisted: updating the
+ * conversation's last-message preview, firing the outbound webhook, fanning
+ * out conversation/badge updates to every member's own devices, and pushing
+ * to whichever recipients aren't actively viewing the conversation right now.
+ * Shared verbatim by the live EVT.SEND handler and the scheduled-message
+ * delivery cron so a message's downstream behavior never depends on which of
+ * the two triggered it — see ScheduledMessagesCron.deliverOne().
+ */
+export async function runPostSendSideEffects(
+  deps: Pick<MessagesDeps, 'djangoConversationClient' | 'notificationsService'>,
+  server: Server,
+  args: {
+    conversationId: string
+    senderId: string
+    senderName?: string
+    createdId: string
+    seq: number
+    createdAt: Date
+    preview?: string
+  },
+): Promise<void> {
+  const { conversationId, senderId, senderName, createdId, seq, createdAt, preview } = args
+
+  await deps.djangoConversationClient.updateLastMessage({
+    conversationId,
+    createdAt,
+    preview,
+  }).catch((e: any) => logger.warn('[messages] updateLastMessage failed', e?.message))
+
+  await deps.djangoConversationClient.dispatchWebhook({
+    conversationId,
+    event: 'message.created',
+    payload: { messageId: createdId, senderId },
+  }).catch((e: any) => logger.warn('[messages] dispatchWebhook failed', e?.message))
+
+  if (!deps.djangoConversationClient.listMemberIds) return
+  const memberIds = await deps.djangoConversationClient.listMemberIds(conversationId).catch((e: any) => {
+    logger.warn('[messages] listMemberIds failed', e?.message)
+    return [] as string[]
+  })
+  for (const userId of memberIds) {
+    const convUpdatePayload = {
+      event: EVT.CONVERSATION_UPDATED,
+      reason: 'message_created',
+      conversationId,
+      messageId: createdId,
+      senderId,
+      preview,
+      lastMessageAt: createdAt.toISOString(),
+      seq,
+    }
+    safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, convUpdatePayload)
+    // Also emit conversation.last_message so frontend last-message listeners fire
+    safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_LAST_MESSAGE, convUpdatePayload)
+    safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
+      event: EVT.MAIN_TAB_BADGES_UPDATED,
+      source: 'messages',
+      reason: 'message_created',
+      conversationId,
+      userId: String(userId),
+      at: new Date().toISOString(),
+    })
+    if (!deps.notificationsService) continue
+    if (String(userId) === String(senderId)) continue
+    // Presence.isOnline only reflects "has any live socket to the server" —
+    // true even while backgrounded, since iOS/Android keep a socket
+    // connection alive for a while after the app leaves the foreground.
+    // Room membership is the correct signal: the client explicitly joins
+    // this conversation's room only while actively viewing it (chat.join)
+    // and leaves it when navigating away or backgrounding (chat.leave).
+    const recipientSockets = await server.in(rooms.convRoom(conversationId)).fetchSockets()
+    const isActivelyViewing = recipientSockets.some(
+      (s: any) => String(s.principal?.userId) === String(userId),
+    )
+    if (isActivelyViewing) {
+      logger.log(`[messages] push skipped: recipient=${userId} is actively viewing conversation=${conversationId}`)
+      continue
+    }
+    logger.log(`[messages] sending push: recipient=${userId} conversation=${conversationId} messageId=${createdId}`)
+    await deps.notificationsService.notifyNewMessage({
+      toUserId: String(userId),
+      conversationId,
+      messageId: createdId,
+      preview,
+      senderName,
+      senderId,
+    }).then((res: any) => logger.log(`[messages] push result recipient=${userId}: ${JSON.stringify(res)}`))
+      .catch((e: any) => logger.warn('[messages] notifyNewMessage failed', e?.message))
+  }
+}
+
 export function registerMessageHandlers(server: Server, socket: Socket, deps: MessagesDeps) {
   socket.on(EVT.SEND, async (payload: SendMessagePayload, ack?: (a: Ack<{ ack: SendMessageAck }>) => void) => {
     const principal = getPrincipal(socket)
@@ -384,98 +496,9 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         createdAt: created.createdAt.toISOString(),
       }
 
-      // Intercept scheduled messages - persist but do not broadcast yet
-      if (payload.scheduledAt) {
-        const scheduledDate = new Date(payload.scheduledAt)
-        const tenSecondsFromNow = new Date(Date.now() + 10_000)
-        if (!isNaN(scheduledDate.getTime()) && scheduledDate > tenSecondsFromNow) {
-          safeAck(ack, ok({ ack: { ...ackPayload, scheduled: true, scheduledAt: scheduledDate.toISOString() } }))
-          return
-        }
-      }
-
       // Broadcast first so clients see the new message immediately
-      safeEmit(server, rooms.convRoom(conversationId), EVT.MESSAGE, createdDto)
-      socket.emit(EVT.MESSAGE, createdDto)
+      broadcastCreatedMessage(server, conversationId, createdDto, socket)
       safeAck(ack, ok({ ack: ackPayload }))
-
-      const _postSendSideEffects = async () => {
-        const preview = createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
-          ? 'Encrypted message'
-          : (createdDto?.text ?? payload?.text))
-
-        await deps.djangoConversationClient.updateLastMessage({
-          conversationId,
-          createdAt: created.createdAt,
-          preview,
-        }).catch((e: any) => logger.warn('[messages] updateLastMessage failed', e?.message))
-
-        await deps.djangoConversationClient.dispatchWebhook({
-          conversationId,
-          event: 'message.created',
-          payload: { messageId: created.id, senderId: principal.userId },
-        }).catch((e: any) => logger.warn('[messages] dispatchWebhook failed', e?.message))
-
-        // Call via the object to preserve `this` context inside listMemberIds
-        if (deps.djangoConversationClient.listMemberIds) {
-          const memberIds = await deps.djangoConversationClient.listMemberIds(conversationId).catch((e: any) => {
-            logger.warn('[messages] listMemberIds failed', e?.message)
-            return [] as string[]
-          })
-          for (const userId of memberIds) {
-            const convUpdatePayload = {
-              event: EVT.CONVERSATION_UPDATED,
-              reason: 'message_created',
-              conversationId,
-              messageId: created.id,
-              senderId: principal.userId,
-              preview,
-              lastMessageAt: created.createdAt.toISOString(),
-              seq: created.seq,
-            }
-            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_UPDATED, convUpdatePayload)
-            // Also emit conversation.last_message so frontend last-message listeners fire
-            safeEmit(server, rooms.userRoom(String(userId)), EVT.CONVERSATION_LAST_MESSAGE, convUpdatePayload)
-            safeEmit(server, rooms.userRoom(String(userId)), EVT.MAIN_TAB_BADGES_UPDATED, {
-              event: EVT.MAIN_TAB_BADGES_UPDATED,
-              source: 'messages',
-              reason: 'message_created',
-              conversationId,
-              userId: String(userId),
-              at: new Date().toISOString(),
-            })
-            if (!deps.notificationsService) continue
-            if (String(userId) === String(principal.userId)) continue
-            // Presence.isOnline only reflects "has any live socket to the
-            // server" — true even while backgrounded, since iOS/Android keep
-            // a socket connection alive for a while after the app leaves the
-            // foreground. That made push silently never fire for the common
-            // "app backgrounded" case. Room membership is the correct signal:
-            // the client explicitly joins this conversation's room only while
-            // actively viewing it (chat.join) and leaves it when navigating
-            // away or backgrounding (chat.leave), so this reflects whether
-            // the recipient is genuinely looking at this chat right now.
-            const recipientSockets = await server.in(rooms.convRoom(conversationId)).fetchSockets()
-            const isActivelyViewing = recipientSockets.some(
-              (s: any) => String(s.principal?.userId) === String(userId),
-            )
-            if (isActivelyViewing) {
-              logger.log(`[messages] push skipped: recipient=${userId} is actively viewing conversation=${conversationId}`)
-              continue
-            }
-            logger.log(`[messages] sending push: recipient=${userId} conversation=${conversationId} messageId=${created.id}`)
-            await deps.notificationsService.notifyNewMessage({
-              toUserId: String(userId),
-              conversationId,
-              messageId: created.id,
-              preview,
-              senderName: principal.username ?? undefined,
-              senderId: principal.userId,
-            }).then((res: any) => logger.log(`[messages] push result recipient=${userId}: ${JSON.stringify(res)}`))
-              .catch((e: any) => logger.warn('[messages] notifyNewMessage failed', e?.message))
-          }
-        }
-      }
 
       if (created.reused) {
         // This clientId was already persisted by an earlier call (e.g. the
@@ -485,7 +508,22 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
         // would dispatch a duplicate outbound webhook and a duplicate push.
         logger.log(`[messages] skipping post-send side effects for reused clientId=${clientId} serverId=${created.id}`)
       } else {
-        _postSendSideEffects().catch((e: any) =>
+        const preview = createdDto?.previewText ?? payload?.previewText ?? (hasEncryptedPayload
+          ? 'Encrypted message'
+          : (createdDto?.text ?? payload?.text))
+        runPostSendSideEffects(
+          { djangoConversationClient: deps.djangoConversationClient, notificationsService: deps.notificationsService },
+          server,
+          {
+            conversationId,
+            senderId: principal.userId,
+            senderName: principal.username ?? undefined,
+            createdId: created.id,
+            seq: created.seq,
+            createdAt: created.createdAt,
+            preview,
+          },
+        ).catch((e: any) =>
           logger.error('[messages] post-send side effects failed', e?.stack ?? e?.message),
         )
       }
@@ -724,27 +762,6 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
       safeAck(ack, ok({ viewed: true }))
     } catch (e: any) {
       safeAck(ack, err(e?.message ?? 'View-once acknowledgement failed', 'ERROR'))
-    }
-  })
-
-  socket.on(EVT.SCHEDULE_CANCEL, async (payload: { conversationId: string; messageId: string }, ack?: (a: Ack<any>) => void) => {
-    const principal = getPrincipal(socket)
-    const { conversationId, messageId } = payload || {}
-
-    if (!conversationId || !messageId) {
-      return safeAck(ack, err('conversationId and messageId are required', 'BAD_REQUEST'))
-    }
-
-    try {
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
-      const deleted = await deps.messagesService.deleteMessage({
-        senderId: principal.userId,
-        conversationId,
-        messageId,
-      })
-      safeAck(ack, ok({ cancelled: true, messageId: (deleted as any)?._id?.toString() ?? messageId }))
-    } catch (e: any) {
-      safeAck(ack, err(e?.message ?? 'Schedule cancel failed', 'ERROR'))
     }
   })
 

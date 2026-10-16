@@ -263,9 +263,10 @@ export const EVT = {
   POLL_UPDATED: 'chat.poll_updated',
   CLOSE_POLL: 'chat.close_poll',
 
-  // Scheduled messages
-  SCHEDULED_DELIVERED: 'chat.scheduled_delivered',
-  SCHEDULE_CANCEL: 'chat.schedule_cancel',
+  // Scheduled messages — emitted to the sender's own user room whenever a
+  // scheduled message's status changes (sent/failed/cancelled), so the
+  // Scheduled Messages screen can update live without polling.
+  SCHEDULED_MESSAGE_UPDATED: 'chat.scheduled_message_updated',
 
   // Subroom / thread management
   SUBROOM_RENAME: 'subroom.rename',
@@ -401,7 +402,6 @@ export interface SendMessagePayload {
   threadId?: string
   replyTo?: string
   ephemeral?: boolean
-  scheduledAt?: string  // ISO 8601 — if present, message is queued not delivered immediately
 
   encrypted?: boolean
   ciphertext?: string
