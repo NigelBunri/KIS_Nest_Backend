@@ -368,6 +368,22 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const callType = args.callType ?? args.media ?? 'voice'
     const legacyMedia = callType.startsWith('video') ? 'video' : 'voice'
 
+    // A call with no directly-invited participants (an open/link-shareable
+    // call: voice channels, or a call.offer sent with inviteeUserIds: []) has
+    // nobody to "answer" it — call.answer is only ever emitted by someone
+    // joining via the invite link, at whatever time they happen to click it,
+    // possibly long after creation. Starting it as 'ringing' left it subject
+    // to cleanupStaleCalls' 90s ringingCutoff, which auto-missed it the
+    // moment nobody (because there was no one TO) answered in time — so any
+    // invite-link join attempted after that point hit markActive's
+    // ringing/active-only match, got rejected as CALL_ENDED, and the joiner
+    // saw "Call ended" on a call the host considered very much ongoing.
+    // Starting it 'active' immediately (the host is already present and
+    // waiting) matches startVoiceChannel's local session state and keeps it
+    // out of the ringing reaper entirely, while a call with real invitees
+    // still starts 'ringing' so an unanswered 1:1/group ring still times out.
+    const startsActive = participants.length <= 1
+
     try {
       const doc = await this.calls.create({
         conversationId: args.conversationId,
@@ -375,7 +391,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
         createdBy: String(args.createdBy),
         createdByDisplayName: args.createdByDisplayName ?? null,
         createdByPhone: args.createdByPhone ?? null,
-        status: 'ringing',
+        status: startsActive ? 'active' : 'ringing',
         startedAt: now,
         endedAt: null,
         callType,

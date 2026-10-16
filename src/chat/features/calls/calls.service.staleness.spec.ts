@@ -221,6 +221,53 @@ describe('CallsService — call staleness and state-machine integrity', () => {
         }),
       ).rejects.toThrow('CALL_ALREADY_ENDED')
     })
+
+    // Regression for the invite-link "Call ended" bug: a call started with
+    // no invitees (voice channels, or any call.offer with inviteeUserIds: [])
+    // has nobody to answer it, so it must not start 'ringing' — that left it
+    // subject to cleanupStaleCalls' 90s ringingCutoff, which auto-missed it
+    // before anyone had a chance to click the invite link.
+    it('starts a call with no invitees as ACTIVE, not ringing', async () => {
+      const calls = {
+        findOne: jest.fn().mockReturnValue({ lean: () => Promise.resolve(null) }),
+        create: jest.fn().mockResolvedValue({
+          toObject: () => ({ conversationId: 'conv-9', callId: 'call-9', status: 'active' }),
+        }),
+      }
+      const service = new CallsService(calls as any)
+
+      await service.createCallOrThrowIfActiveInConversation({
+        conversationId: 'conv-9',
+        callId: 'call-9',
+        createdBy: 'caller-1',
+        inviteeUserIds: [],
+      })
+
+      expect(calls.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'active' }),
+      )
+    })
+
+    it('still starts a call WITH invitees as ringing (normal ring/answer flow)', async () => {
+      const calls = {
+        findOne: jest.fn().mockReturnValue({ lean: () => Promise.resolve(null) }),
+        create: jest.fn().mockResolvedValue({
+          toObject: () => ({ conversationId: 'conv-9b', callId: 'call-9b', status: 'ringing' }),
+        }),
+      }
+      const service = new CallsService(calls as any)
+
+      await service.createCallOrThrowIfActiveInConversation({
+        conversationId: 'conv-9b',
+        callId: 'call-9b',
+        createdBy: 'caller-1',
+        inviteeUserIds: ['invitee-1'],
+      })
+
+      expect(calls.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'ringing' }),
+      )
+    })
   })
 
   describe('markActive — stale-answer protection', () => {
