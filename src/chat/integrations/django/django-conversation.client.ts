@@ -77,6 +77,15 @@ export class DjangoConversationClient {
   >();
   private readonly memberIdsTtlMs = 30_000;
 
+  private readonly mutedMemberIdsCache = new Map<
+    string,
+    { expiresAt: number; ids: string[] }
+  >();
+  // Short TTL relative to memberIdsCache above - a user who just muted a
+  // chat expects the NEXT message to stay silent, not whatever's left of a
+  // 30s membership cache window.
+  private readonly mutedMemberIdsTtlMs = 10_000;
+
   /**
    * Fetch conversation-scoped permissions from Django
    *
@@ -449,6 +458,63 @@ export class DjangoConversationClient {
       return ids;
     } catch {
       // Serve stale cache if Django is unreachable so CONVERSATION_UPDATED still broadcasts
+      if (cached) return cached.ids;
+      return [];
+    }
+  }
+
+  /**
+   * Which members have muted THIS conversation (ConversationMember.is_muted,
+   * set by the /mute/ action on Django's ConversationViewSet - see
+   * ChatRoomHandlers.tsx's handleMuteConversation). runPostSendSideEffects
+   * uses this to skip notifyNewMessage for muted recipients the same way it
+   * already skips anyone actively viewing the conversation - without this,
+   * muting a chat only hid its notification-settings toggle state, it never
+   * actually stopped a single push.
+   */
+  async getMutedMemberIds(conversationId: string): Promise<string[]> {
+    if (isBroadcastConversation(conversationId)) {
+      return [];
+    }
+
+    const now = Date.now();
+    const cached = this.mutedMemberIdsCache.get(conversationId);
+    if (cached && cached.expiresAt > now) {
+      return cached.ids;
+    }
+
+    const base = this.djangoApiBase();
+    const url =
+      applyConversationIdTemplate(process.env.DJANGO_CONV_MUTED_MEMBER_IDS_URL, conversationId) ??
+      (base
+        ? `${base}/chat/conversations/${conversationId}/muted-member-ids/`
+        : undefined);
+
+    if (!url) return [];
+
+    try {
+      const res = await firstValueFrom(
+        this.http.get<DjangoMemberIdsResponse>(url, {
+          headers: {
+            ...signedInternalHeaders({
+              method: 'GET',
+              url,
+              secret: process.env.DJANGO_INTERNAL_TOKEN ?? '',
+            }),
+          },
+          timeout: 5000,
+        }),
+      );
+
+      const data = res?.data ?? {};
+      const ids = (data.user_ids ?? data.userIds ?? []).map((id) => String(id));
+      this.mutedMemberIdsCache.set(conversationId, { expiresAt: now + this.mutedMemberIdsTtlMs, ids });
+      return ids;
+    } catch {
+      // Fail open to "nobody muted" on a transient Django error - a missed
+      // mute check means one extra push notification gets through, which is
+      // far less harmful than silently dropping a message for everyone if
+      // this were treated as fail-closed.
       if (cached) return cached.ids;
       return [];
     }

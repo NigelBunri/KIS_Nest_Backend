@@ -142,6 +142,7 @@ export interface MessagesDeps {
     assertMember(principal: SocketPrincipal, conversationId: string): Promise<any>
     updateLastMessage(args: { conversationId: string; createdAt: Date; preview?: string }): Promise<void>
     listMemberIds?: (conversationId: string) => Promise<string[]>
+    getMutedMemberIds?: (conversationId: string) => Promise<string[]>
     policyCheck?: (args: {
       principal: SocketPrincipal
       conversationId: string
@@ -308,6 +309,17 @@ export async function runPostSendSideEffects(
     logger.warn('[messages] listMemberIds failed', e?.message)
     return [] as string[]
   })
+  // Fetched once per send (not per-recipient) - who has muted THIS
+  // conversation. Previously nothing in the push pipeline ever checked
+  // per-conversation mute at all, only each recipient's GLOBAL "message
+  // notifications" preference and DND hours - muting one chat had zero
+  // effect on whether its pushes kept arriving.
+  const mutedUserIds = new Set(
+    (await deps.djangoConversationClient.getMutedMemberIds?.(conversationId).catch((e: any) => {
+      logger.warn('[messages] getMutedMemberIds failed', e?.message)
+      return [] as string[]
+    })) ?? [],
+  )
   for (const userId of memberIds) {
     const convUpdatePayload = {
       event: EVT.CONVERSATION_UPDATED,
@@ -344,6 +356,10 @@ export async function runPostSendSideEffects(
     )
     if (isActivelyViewing) {
       logger.log(`[messages] push skipped: recipient=${userId} is actively viewing conversation=${conversationId}`)
+      continue
+    }
+    if (mutedUserIds.has(String(userId))) {
+      logger.log(`[messages] push skipped: recipient=${userId} has muted conversation=${conversationId}`)
       continue
     }
     logger.log(`[messages] sending push: recipient=${userId} conversation=${conversationId} messageId=${createdId}`)
