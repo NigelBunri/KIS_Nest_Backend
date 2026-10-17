@@ -77,6 +77,7 @@ export interface CallsDeps {
     }): Promise<any>
     ensureCallExistsOrThrow?(conversationId: string, callId: string): Promise<any>
     getCallCreator?(conversationId: string, callId: string): Promise<string | null>
+    hasActiveInviteToken?(conversationId: string, callId: string): Promise<boolean>
     markActive?(conversationId: string, callId: string): Promise<any>
     setParticipantStatus?(
       conversationId: string,
@@ -292,16 +293,42 @@ function createCallHandler(
       return safeAck(ack, err('conversationId required', 'BAD_REQUEST'))
     }
 
+    const callId = typeof payload?.callId === 'string' ? payload.callId : undefined
+    // Set below (CALL_ANSWER/CALL_ICE/CALL_END only) when this caller isn't a
+    // Django member of `conversationId` but the call they're acting on has
+    // an active, server-issued invite token — i.e. exactly the "share this
+    // link with anyone" flow getOrCreateInviteToken's own doc comment
+    // ("for conversation-backed calls we create one on demand") and
+    // joinByToken (calls.controller.ts) already promise. Read again, below,
+    // by the CALL_ANSWER block-check, which must apply equally to this case.
+    let isInviteLinkEligible = false
+
     try {
       await deps.rateLimitService?.assert(principal, `call:${event}`, 20)
       // Standalone calls use a synthetic conversationId (`standalone:<callId>`).
       // They have no Django conversation record, so skip membership check and
       // instead verify the caller is the creator (checked via callsService below).
       if (!conversationId.startsWith('standalone:')) {
-        await deps.djangoConversationClient.assertMember(principal, conversationId)
+        try {
+          await deps.djangoConversationClient.assertMember(principal, conversationId)
+        } catch (membershipError) {
+          // A non-member answering/ICE-ing/ending a conversation-backed call
+          // was unconditionally rejected here even when they got there via a
+          // perfectly valid invite link resolved through GET /calls/join/
+          // :token — the client reads that rejection as "this call just
+          // ended" (closes WebRTC, shows "Call ended") immediately after a
+          // successful-looking join. CALL_OFFER is deliberately excluded:
+          // its sender is always the call's own creator, who got there by
+          // already being inside the conversation's chat UI, so there's
+          // nothing to bypass for that event — an offer from a genuine
+          // non-member should keep failing exactly as before.
+          isInviteLinkEligible =
+            !!callId &&
+            (event === EVT.CALL_ANSWER || event === EVT.CALL_ICE || event === EVT.CALL_END) &&
+            !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+          if (!isInviteLinkEligible) throw membershipError
+        }
       }
-
-      const callId = typeof payload?.callId === 'string' ? payload.callId : undefined
       const enrichedPayload: Record<string, unknown> = {
         ...(payload ?? {}),
         conversationId,
@@ -384,17 +411,19 @@ function createCallHandler(
           const callToJoin = await deps.callsService.ensureCallExistsOrThrow?.(conversationId, callId)
 
           // Standalone calls skip assertMember (no conversation to check
-          // membership against), and setParticipantStatus below will
-          // happily $push a brand-new participant for anyone who reaches
-          // this point - there's no invite-list check here by design (an
-          // uninvited person joining via a shared invite link is the
-          // intended flow, see calls.controller.ts joinByToken). But a
-          // block between the joiner and the call's creator must still
-          // stop the join outright, the same as it stops a DM or a
-          // ws-perms-checked group call - otherwise blocking someone would
-          // do nothing to stop them joining a call THEY started.
+          // membership against), and so does a conversation-backed call
+          // with an active invite token (isInviteLinkEligible, set above) —
+          // either way setParticipantStatus below will happily $push a
+          // brand-new participant for anyone who reaches this point -
+          // there's no invite-list check here by design (an uninvited
+          // person joining via a shared invite link is the intended flow,
+          // see calls.controller.ts joinByToken). But a block between the
+          // joiner and the call's creator must still stop the join outright
+          // in BOTH cases, the same as it stops a DM or a ws-perms-checked
+          // group call - otherwise blocking someone would do nothing to
+          // stop them joining a call THEY started.
           if (
-            conversationId.startsWith('standalone:') &&
+            (conversationId.startsWith('standalone:') || isInviteLinkEligible) &&
             callToJoin?.createdBy &&
             callToJoin.createdBy !== principal.userId &&
             deps.djangoConversationClient.checkBlockedAmong
@@ -1369,6 +1398,7 @@ function registerJoinBeforeHostHandlers(server: Server, socket: Socket, deps: Ca
     const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
     const callId = typeof p.callId === 'string' ? p.callId : null
     if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
+    let isInviteLinkEligible = false
     try {
       // Standalone (invite-link/scheduled) calls have no Django conversation
       // record — assertMember always throws for them. This is the dominant
@@ -1377,7 +1407,18 @@ function registerJoinBeforeHostHandlers(server: Server, socket: Socket, deps: Ca
       // standalone-aware handler in this file does, and instead rely on the
       // call actually existing below.
       if (!conversationId.startsWith('standalone:')) {
-        await deps.djangoConversationClient.assertMember(principal, conversationId)
+        try {
+          await deps.djangoConversationClient.assertMember(principal, conversationId)
+        } catch (membershipError) {
+          // Same bug class as createCallHandler's CALL_ANSWER bypass above:
+          // a conversation-backed scheduled call someone made shareable via
+          // GET /calls/join/:token must stay joinable by a non-member who
+          // resolved it through that exact link — the client only gets here
+          // from CallJoinScreen's "waiting for host" branch, which is
+          // reachable by anyone holding the link, not just members.
+          isInviteLinkEligible = !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+          if (!isInviteLinkEligible) throw membershipError
+        }
       }
       const call = await deps.callsService?.getCall?.(conversationId, callId)
       if (!call) return safeAck(ack, err('Call not found', 'NOT_FOUND'))
@@ -1385,11 +1426,11 @@ function registerJoinBeforeHostHandlers(server: Server, socket: Socket, deps: Ca
         return safeAck(ack, err('This call is no longer available', 'CALL_ENDED'))
       }
       // A block between this user and the call's creator must stop them
-      // from even entering the waiting room for a standalone call, the same
-      // as it stops them from being offered the call at all (see
-      // createCallHandler's identical check on the invite path).
+      // from even entering the waiting room for a standalone OR invite-
+      // link-eligible call, the same as it stops them from being offered
+      // the call at all (see createCallHandler's identical check).
       if (
-        conversationId.startsWith('standalone:') &&
+        (conversationId.startsWith('standalone:') || isInviteLinkEligible) &&
         call.createdBy &&
         call.createdBy !== principal.userId &&
         deps.djangoConversationClient.checkBlockedAmong

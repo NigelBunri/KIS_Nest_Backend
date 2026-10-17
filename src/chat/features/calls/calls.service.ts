@@ -822,6 +822,26 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     return token
   }
 
+  /**
+   * Whether `callId` is currently joinable by someone who is NOT a Django
+   * member of `conversationId` — i.e. it has a persisted, still-valid
+   * invite token (set by createStandaloneCall or getOrCreateInviteToken)
+   * and hasn't ended. This is the authoritative gate createCallHandler
+   * uses to decide whether to bypass the Django conversation-membership
+   * check for call.answer/call.ice/call.end: an ordinary private group/DM
+   * call that never had an invite link generated keeps requiring
+   * membership, completely unchanged — only a call someone explicitly
+   * made shareable (the same inviteToken field joinByToken itself reads)
+   * opens this door, and only for that specific call.
+   */
+  async hasActiveInviteToken(conversationId: string, callId: string): Promise<boolean> {
+    const call = await this.calls.findOne(
+      { conversationId, callId },
+      { inviteToken: 1, status: 1 },
+    ).lean()
+    return !!call?.inviteToken && call.status !== 'ended' && call.status !== 'missed'
+  }
+
   /** List upcoming scheduled calls for a user. */
   async getScheduledCalls(userId: string): Promise<CallSession[]> {
     const now = new Date()

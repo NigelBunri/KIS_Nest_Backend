@@ -161,6 +161,75 @@ describe('call.waiting.join', () => {
 
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'BLOCKED' }))
   })
+
+  // Same bug as call.answer (see calls.invite-link-answer.spec.ts): a
+  // conversation-backed scheduled call someone made shareable via GET
+  // /calls/join/:token must stay joinable in the waiting room by a
+  // non-member who resolved it through that exact link — this used to
+  // unconditionally throw on assertMember for any non-standalone
+  // conversationId, with no invite-token check at all.
+  it('lets a non-member wait on a conversation-backed call that has an active invite token', async () => {
+    const { socket, handlers } = makeSocket('guest-1')
+    const { server } = makeServer()
+    const assertMember = jest.fn().mockRejectedValue(new Error('Not a conversation member'))
+    const hasActiveInviteToken = jest.fn().mockResolvedValue(true)
+    const setParticipantStatus = jest.fn()
+    const deps = {
+      djangoConversationClient: { assertMember },
+      callsService: {
+        getCall: jest.fn().mockResolvedValue({ status: 'pending', createdBy: 'host-1', callType: 'video', title: 'Sunday service' }),
+        hasActiveInviteToken,
+        setParticipantStatus,
+      },
+    } as unknown as CallsDeps
+    registerCallHandlers(server as any, socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get('call.waiting.join')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(hasActiveInviteToken).toHaveBeenCalledWith('conv-123', 'call-1')
+    expect(setParticipantStatus).toHaveBeenCalledWith('conv-123', 'call-1', 'guest-1', 'invited')
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+  })
+
+  it('still rejects a non-member for a conversation-backed call with NO invite token', async () => {
+    const { socket, handlers } = makeSocket('guest-1')
+    const { server } = makeServer()
+    const assertMember = jest.fn().mockRejectedValue(new Error('Not a conversation member'))
+    const deps = {
+      djangoConversationClient: { assertMember },
+      callsService: { hasActiveInviteToken: jest.fn().mockResolvedValue(false) },
+    } as unknown as CallsDeps
+    registerCallHandlers(server as any, socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get('call.waiting.join')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false }))
+  })
+
+  it('enforces the block check for an invite-link waiting-room joiner on a real conversation too', async () => {
+    const { socket, handlers } = makeSocket('blocked-user')
+    const { server } = makeServer()
+    const checkBlockedAmong = jest.fn().mockResolvedValue(['host-1'])
+    const deps = {
+      djangoConversationClient: {
+        assertMember: jest.fn().mockRejectedValue(new Error('Not a conversation member')),
+        checkBlockedAmong,
+      },
+      callsService: {
+        getCall: jest.fn().mockResolvedValue({ status: 'pending', createdBy: 'host-1' }),
+        hasActiveInviteToken: jest.fn().mockResolvedValue(true),
+      },
+    } as unknown as CallsDeps
+    registerCallHandlers(server as any, socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get('call.waiting.join')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(checkBlockedAmong).toHaveBeenCalledWith('blocked-user', ['host-1'])
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'BLOCKED' }))
+  })
 })
 
 describe('call.knock.deny', () => {
