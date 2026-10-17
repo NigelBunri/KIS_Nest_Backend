@@ -228,6 +228,10 @@ export const EVT = {
 
   // Join-before-host: waiting for the host to start
   CALL_HOST_JOINED: 'call.host.joined',
+  CALL_WAITING_JOIN: 'call.waiting.join',
+  CALL_SCHEDULED_START: 'call.scheduled.start',
+  CALL_SCHEDULE_CANCEL: 'call.schedule.cancel',
+  CALL_SCHEDULE_UPDATE: 'call.schedule.update',
 
   // Whiteboard
   CALL_WB_STROKE: 'call.wb.stroke',

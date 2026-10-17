@@ -828,11 +828,75 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     return this.calls
       .find({
         scheduledFor: { $gt: now },
-        status: 'ringing',
+        // A freshly-created future call is persisted with status 'pending'
+        // (see createStandaloneCall above) — it only ever becomes 'ringing'
+        // once startScheduledCall() actually starts it, at which point it
+        // correctly falls out of this "upcoming" list. This used to filter
+        // on 'ringing', which no scheduled call is ever in before it starts,
+        // so the upcoming-calls list was permanently empty.
+        status: 'pending',
         $or: [{ createdBy: userId }, { 'participants.userId': userId }],
       })
       .sort({ scheduledFor: 1 })
       .limit(50)
+      .lean()
+  }
+
+  /**
+   * Transition a scheduled call from 'pending' to 'ringing' so the host can
+   * actually start it at (or before) its scheduled time. Reuses the SAME
+   * callId/conversationId/participants/inviteToken the call was scheduled
+   * with — critically, this must NOT create a new call row, or everyone who
+   * already holds the invite link / sees the scheduled entry would be
+   * pointed at a call that never starts.
+   * Returns null if the call doesn't exist, isn't pending, or the caller
+   * isn't its creator (host-only action).
+   */
+  async startScheduledCall(
+    conversationId: string,
+    callId: string,
+    userId: string,
+  ): Promise<CallSession | null> {
+    const now = new Date()
+    return this.calls
+      .findOneAndUpdate(
+        { conversationId, callId, createdBy: userId, status: 'pending' },
+        { $set: { status: 'ringing', startedAt: now, isActiveInConversation: true } },
+        { new: true },
+      )
+      .lean()
+  }
+
+  /**
+   * Cancel a scheduled call before it starts. Host-only; a no-op (returns
+   * false) once the call has already started or ended — cancelling must
+   * never retroactively end a call that's genuinely in progress.
+   */
+  async cancelScheduledCall(conversationId: string, callId: string, userId: string): Promise<boolean> {
+    const now = new Date()
+    const result = await this.calls.updateOne(
+      { conversationId, callId, createdBy: userId, status: 'pending' },
+      { $set: { status: 'ended', endedAt: now, isActiveInConversation: false } },
+    )
+    return result.modifiedCount > 0
+  }
+
+  /**
+   * Reschedule a still-pending call to a new time. Host-only; rejected once
+   * the call has started (use normal in-call controls at that point).
+   */
+  async rescheduleCall(
+    conversationId: string,
+    callId: string,
+    userId: string,
+    scheduledFor: Date,
+  ): Promise<CallSession | null> {
+    return this.calls
+      .findOneAndUpdate(
+        { conversationId, callId, createdBy: userId, status: 'pending' },
+        { $set: { scheduledFor } },
+        { new: true },
+      )
       .lean()
   }
 

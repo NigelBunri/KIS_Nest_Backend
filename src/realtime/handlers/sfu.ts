@@ -55,7 +55,15 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
 
     try {
       await rateLimitService?.assert(principal, 'sfu:join', 10)
-      await djangoConversationClient.assertMember(principal, conversationId)
+      // Standalone calls (conversationId = `standalone:<callId>`) have no
+      // Django conversation record — assertMember always throws for them,
+      // which made the entire SFU/group-media path unreachable for every
+      // invite-link or scheduled call, including for the call's own host.
+      // The CallSession participant check below is the real authority here
+      // (same standalone-skip pattern as createCallHandler in calls.ts).
+      if (!conversationId.startsWith('standalone:')) {
+        await djangoConversationClient.assertMember(principal, conversationId)
+      }
 
       // assertMember only proves the caller belongs to SOME conversation they
       // named - it says nothing about whether callId is a real call that
@@ -64,9 +72,17 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
       // supply an arbitrary/guessed callId from an unrelated call and the SFU
       // would happily let them join it (see the CallSession record as the
       // source of truth for call membership, same as the P2P call path).
+      //
+      // Only 'joined'/'connecting' count as real media access. A participant
+      // sitting in the waiting room (status 'invited', set by
+      // call.waiting.join — see registerJoinBeforeHostHandlers in calls.ts)
+      // or one the host explicitly 'rejected'/removed must NOT be able to
+      // reach live audio/video by calling sfu.join directly — this is the
+      // waiting room's actual security boundary, not merely a UI gate.
       const call = await callsService.getCall(conversationId, callId)
       const isCallParticipant = !!call?.participants?.some(
-        (row: any) => String(row.userId) === String(principal.userId) && row.status !== 'rejected',
+        (row: any) => String(row.userId) === String(principal.userId) &&
+          (row.status === 'joined' || row.status === 'connecting'),
       )
       if (!call || !isCallParticipant) {
         return safeAck(ack, err('Not a participant of this call', 'FORBIDDEN'))

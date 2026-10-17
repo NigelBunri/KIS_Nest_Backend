@@ -215,9 +215,26 @@ export class CallsController {
    */
   @Get('join/:token')
   async joinByToken(@Req() req: FastifyRequest, @Param('token') token: string) {
-    await this.resolveUser(req)
+    const principal = await this.resolveUser(req)
     const call = await this.callsService.getCallByToken(token)
     if (!call) throw new NotFoundException('Invite link not found or has expired')
+    // A terminal call's invite link must stop resolving to something
+    // joinable — otherwise an old shared link for a call that already
+    // ended keeps dangling as a (useless, but misleading) "join" target
+    // forever, since inviteToken is never cleared on end.
+    if (call.status === 'ended' || call.status === 'missed') {
+      throw new NotFoundException('This call has ended')
+    }
+    // Resolving a token never went through createCallHandler's invitee
+    // block-check (that only covers the ORIGINAL invitee list at
+    // call.offer time) — this is the one path where literally anyone with
+    // the link, including someone the host has blocked, could otherwise
+    // resolve straight to a joinable call. checkBlockedAmong fails closed
+    // (denies) if Django is unreachable, same as every other call path.
+    if (call.createdBy && call.createdBy !== principal.userId && this.djangoConversationClient.checkBlockedAmong) {
+      const blockedIds = await this.djangoConversationClient.checkBlockedAmong(principal.userId, [String(call.createdBy)])
+      if (blockedIds.length > 0) throw new UnauthorizedException('Call not allowed')
+    }
     return {
       callId: call.callId,
       conversationId: call.conversationId,
@@ -227,6 +244,8 @@ export class CallsController {
       isStandalone: call.isStandalone,
       scheduledFor: call.scheduledFor,
       participantCount: call.participants.length,
+      createdBy: call.createdBy,
+      isHost: call.createdBy === principal.userId,
     }
   }
 
@@ -247,6 +266,8 @@ export class CallsController {
         isStandalone: c.isStandalone,
         inviteToken: c.inviteToken,
         participantCount: c.participants.length,
+        createdBy: c.createdBy,
+        isHost: c.createdBy === principal.userId,
       })),
     }
   }
@@ -272,14 +293,23 @@ export class CallsController {
     if (!token) throw new NotFoundException('Call not found or already ended')
     return {
       inviteToken: token,
-      inviteLink: `kis://call/join/${token}`,
+      // Must be the real https:// Universal Link / App Link form, not a
+      // bare kis:// custom scheme — a custom scheme only ever works from
+      // inside the app itself (e.g. a native share sheet), never when
+      // tapped from Messages/Mail/another app, which a shared call invite
+      // cannot depend on. Path matches the website's actual join page
+      // (apps/join/[type]/[token]/page.tsx, type="call") AND this app's
+      // own InviteJoin linking route ('join/:type/:token' in App.tsx),
+      // which redirects a 'call' type straight into CallJoinScreen's real
+      // resolve+join flow — NOT the dead '/call/join/:token' shape used
+      // here previously, which matched neither.
       // kis.app is registered but has no live web server behind it as of
       // 2026-09-09 (confirmed via a direct HTTPS probe - connection times
       // out) - a link shared outside the app to that domain would fail
       // for every recipient, installed or not. Falls back to
       // kingdomimpactventures.org, the one domain that's actually live,
       // matching the same fix applied to Django's KIS_WEBSITE_PUBLIC_BASE_URL.
-      webLink: `${process.env.KIS_WEBSITE_PUBLIC_BASE_URL || 'https://kingdomimpactventures.org'}/call/join/${token}`,
+      inviteLink: `${process.env.KIS_WEBSITE_PUBLIC_BASE_URL || 'https://kingdomimpactventures.org'}/join/call/${token}`,
     }
   }
 

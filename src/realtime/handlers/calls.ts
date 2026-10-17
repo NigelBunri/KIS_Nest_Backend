@@ -121,6 +121,9 @@ export interface CallsDeps {
     setRecordingState?(conversationId: string, callId: string, state: 'idle' | 'recording' | 'stopped', url?: string): Promise<void>
     setRtmp?(conversationId: string, callId: string, active: boolean, url?: string): Promise<void>
     getWaitingParticipants?(conversationId: string, callId: string): Promise<string[]>
+    startScheduledCall?(conversationId: string, callId: string, userId: string): Promise<any>
+    cancelScheduledCall?(conversationId: string, callId: string, userId: string): Promise<boolean>
+    rescheduleCall?(conversationId: string, callId: string, userId: string, scheduledFor: Date): Promise<any>
   }
 }
 
@@ -158,7 +161,16 @@ async function assertCallHost(
   callId: string,
   principal: SocketPrincipal,
 ): Promise<void> {
-  await deps.djangoConversationClient.assertMember(principal, conversationId)
+  // Standalone calls (conversationId = `standalone:<callId>`) have no Django
+  // conversation record at all — assertMember would unconditionally throw
+  // 'Not a conversation member' for every one of them, including for the
+  // call's own real host. Ownership of a standalone call is entirely
+  // determined by getCallCreator() below, exactly like createCallHandler's
+  // identical standalone-skip for call.offer/answer/ice/end — there is no
+  // separate membership concept to check here.
+  if (!conversationId.startsWith('standalone:')) {
+    await deps.djangoConversationClient.assertMember(principal, conversationId)
+  }
   const creator = deps.callsService?.getCallCreator
     ? await deps.callsService.getCallCreator(conversationId, callId)
     : null
@@ -1220,6 +1232,12 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
       await assertCallHost(deps, conversationId, callId, principal)
 
       await deps.callsService?.removeKnocker?.(conversationId, callId, targetUserId)
+      // Record the rejection on the participant row itself (not just the
+      // transient knocking list) so a denied waiting-room participant is
+      // excluded from call.scheduled.start's invitee fan-out AND from
+      // sfu.join's media-access check — denial must stick, not just hide
+      // them from the host's panel until they try again.
+      await deps.callsService?.setParticipantStatus?.(conversationId, callId, targetUserId, 'rejected', 'denied_by_host')
 
       // Tell the knocking user they were denied
       safeEmit(server, rooms.userRoom(targetUserId), EVT.CALL_KNOCK_DENIED, {
@@ -1352,13 +1370,182 @@ function registerJoinBeforeHostHandlers(server: Server, socket: Socket, deps: Ca
     const callId = typeof p.callId === 'string' ? p.callId : null
     if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
     try {
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
-      // Record that this user is waiting
+      // Standalone (invite-link/scheduled) calls have no Django conversation
+      // record — assertMember always throws for them. This is the dominant
+      // real-world use of the waiting room (joining a scheduled call before
+      // the host starts it), so skip membership the same way every other
+      // standalone-aware handler in this file does, and instead rely on the
+      // call actually existing below.
+      if (!conversationId.startsWith('standalone:')) {
+        await deps.djangoConversationClient.assertMember(principal, conversationId)
+      }
+      const call = await deps.callsService?.getCall?.(conversationId, callId)
+      if (!call) return safeAck(ack, err('Call not found', 'NOT_FOUND'))
+      if (call.status !== 'pending' && call.status !== 'ringing') {
+        return safeAck(ack, err('This call is no longer available', 'CALL_ENDED'))
+      }
+      // A block between this user and the call's creator must stop them
+      // from even entering the waiting room for a standalone call, the same
+      // as it stops them from being offered the call at all (see
+      // createCallHandler's identical check on the invite path).
+      if (
+        conversationId.startsWith('standalone:') &&
+        call.createdBy &&
+        call.createdBy !== principal.userId &&
+        deps.djangoConversationClient.checkBlockedAmong
+      ) {
+        const blockedIds = await deps.djangoConversationClient.checkBlockedAmong(principal.userId, [String(call.createdBy)])
+        if (blockedIds.length > 0) return safeAck(ack, err('Call not allowed', 'BLOCKED'))
+      }
+      // Record that this user is waiting. Deliberately left in the
+      // 'invited' status (not 'joined'/'connecting') — sfu.join and the SFU
+      // media-authorization path only grant real audio/video access to
+      // 'joined'/'connecting' participants, so sitting in the waiting room
+      // grants no media access, only the right to be notified when the host
+      // starts the call.
       await deps.callsService?.setParticipantStatus?.(conversationId, callId, principal.userId, 'invited')
-      // Pull socket into conv room so they receive call.offer when the host starts
+      // Pull socket into conv room so they receive call.offer/call.host.joined when the host starts
       socket.join(rooms.convRoom(conversationId))
-      safeAck(ack, ok({ waiting: true }))
+
+      // Surface this person in the SAME host-side admit/reject panel used
+      // for mid-call knocks (CALL_KNOCK_REQUEST / WaitingRoomPanel on
+      // mobile) — reusing it here means the host gets one real admit/deny
+      // UI for every "someone wants in" case instead of a second one built
+      // from scratch. Denying them (call.knock.deny, below) marks them
+      // 'rejected' so call.scheduled.start's invitee fan-out skips them and
+      // sfu.join's participant check keeps denying them media.
+      await deps.callsService?.addKnocker?.(conversationId, callId, principal.userId)
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_KNOCK_REQUEST, {
+        conversationId, callId, userId: principal.userId, displayName: principal.username ?? 'Guest',
+        knockedAt: new Date().toISOString(),
+      })
+
+      safeAck(ack, ok({ waiting: true, callType: call.callType, title: call.title }))
     } catch (e: any) { safeAck(ack, err(e?.message ?? 'Error', 'ERROR')) }
+  })
+}
+
+// ─── Scheduled calls: start / cancel / reschedule ──────────────────────────────
+// A scheduled call is created (pending, scheduledFor in the future) via the
+// REST POST /calls/standalone endpoint. These three socket events are the
+// host-only lifecycle actions on that SAME call record — start must reuse
+// the original callId/participants/inviteToken (not spin up a new call),
+// so everyone already holding the invite link or seeing it in their
+// upcoming-calls list ends up connected to the real thing.
+
+function registerScheduledCallHandlers(server: Server, socket: Socket, deps: CallsDeps) {
+  socket.on(EVT.CALL_SCHEDULED_START, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
+
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:host', 60)
+      const call = await deps.callsService?.startScheduledCall?.(conversationId, callId, principal.userId)
+      if (!call) {
+        return safeAck(ack, err('Call not found, already started, or you are not the host', 'FORBIDDEN'))
+      }
+
+      // A participant the host explicitly denied via call.knock.deny while
+      // waiting (status 'rejected') must not be rung just because the host
+      // then starts the call — denial has to stick.
+      const inviteeIds = (call.participants ?? [])
+        .filter((row: any) => row.status !== 'rejected')
+        .map((row: any) => String(row.userId))
+        .filter((uid: string) => uid !== principal.userId)
+
+      // Tell everyone already sitting in the conv room (waiting-room
+      // participants who called call.waiting.join, or conv members for a
+      // non-standalone scheduled call) that the host has started.
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_HOST_JOINED, {
+        conversationId, callId, hostUserId: principal.userId, startedAt: new Date().toISOString(),
+      })
+
+      // Ring every invitee directly (covers anyone who hasn't opened the
+      // waiting room yet and so isn't in the conv room) — same shape as a
+      // normal call.offer so the mobile CALL_OFFER listener needs no
+      // special-casing to handle it.
+      const enrichedOffer = {
+        conversationId,
+        callId,
+        fromUserId: principal.userId,
+        displayName: principal.username,
+        deviceId: principal.deviceId ?? null,
+        callType: call.callType,
+        media: call.media,
+        title: call.title,
+        startedAt: new Date().toISOString(),
+      }
+      for (const uid of inviteeIds) {
+        safeEmit(server, rooms.userRoom(uid), EVT.CALL_HOST_JOINED, {
+          conversationId, callId, hostUserId: principal.userId, startedAt: enrichedOffer.startedAt,
+        })
+        safeEmit(server, rooms.userRoom(uid), EVT.CALL_OFFER, enrichedOffer)
+        server.in(rooms.userRoom(uid)).socketsJoin(rooms.convRoom(conversationId))
+        if (deps.notificationsService) {
+          deps.notificationsService.notifyIncomingCall({
+            toUserId: uid,
+            fromUserId: principal.userId,
+            fromDisplayName: principal.username,
+            fromPhone: principal.phone,
+            conversationId,
+            callId,
+            callType: call.callType,
+            title: call.title,
+          }).catch((e: any) => logger.warn(`[calls] scheduled-start push failed userId=${uid}`, e?.message))
+        }
+      }
+
+      safeAck(ack, ok({ callId, conversationId, callType: call.callType, title: call.title, inviteeIds }))
+    } catch (error: any) {
+      logger.error(`[calls] call.scheduled.start failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Failed to start scheduled call', 'ERROR'))
+    }
+  })
+
+  socket.on(EVT.CALL_SCHEDULE_CANCEL, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    if (!conversationId || !callId) return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
+    try {
+      const cancelled = await deps.callsService?.cancelScheduledCall?.(conversationId, callId, principal.userId)
+      if (!cancelled) return safeAck(ack, err('Call not found, already started, or you are not the host', 'FORBIDDEN'))
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_SCHEDULE_CANCEL, {
+        conversationId, callId, cancelledBy: principal.userId, cancelledAt: new Date().toISOString(),
+      })
+      safeAck(ack, ok({ cancelled: true }))
+    } catch (error: any) {
+      safeAck(ack, err(error?.message ?? 'Failed to cancel scheduled call', 'ERROR'))
+    }
+  })
+
+  socket.on(EVT.CALL_SCHEDULE_UPDATE, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    const scheduledForRaw = typeof p.scheduledFor === 'string' ? p.scheduledFor : null
+    if (!conversationId || !callId || !scheduledForRaw) {
+      return safeAck(ack, err('conversationId, callId, scheduledFor required', 'BAD_REQUEST'))
+    }
+    const scheduledFor = new Date(scheduledForRaw)
+    if (Number.isNaN(scheduledFor.getTime()) || scheduledFor.getTime() <= Date.now()) {
+      return safeAck(ack, err('scheduledFor must be a valid future date', 'BAD_REQUEST'))
+    }
+    try {
+      const updated = await deps.callsService?.rescheduleCall?.(conversationId, callId, principal.userId, scheduledFor)
+      if (!updated) return safeAck(ack, err('Call not found, already started, or you are not the host', 'FORBIDDEN'))
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_SCHEDULE_UPDATE, {
+        conversationId, callId, scheduledFor: scheduledFor.toISOString(), updatedBy: principal.userId,
+      })
+      safeAck(ack, ok({ scheduledFor: scheduledFor.toISOString() }))
+    } catch (error: any) {
+      safeAck(ack, err(error?.message ?? 'Failed to reschedule call', 'ERROR'))
+    }
   })
 }
 
@@ -1744,6 +1931,9 @@ export function registerCallHandlers(server: Server, socket: Socket, deps: Calls
 
   // Join before host
   registerJoinBeforeHostHandlers(server, socket, deps)
+
+  // Scheduled-call start / cancel / reschedule
+  registerScheduledCallHandlers(server, socket, deps)
 
   // Mid-call invite
   registerInviteHandler(server, socket, deps)
