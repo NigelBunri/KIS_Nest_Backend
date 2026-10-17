@@ -277,18 +277,35 @@ export class DjangoConversationClient {
     if (uniqueOtherIds.length === 0) return [];
 
     const base = this.djangoApiBase();
-    const url = base ? `${base}/chat/internal/blocked-among/` : undefined;
-    if (!url) {
+    const path = base ? `${base}/chat/internal/blocked-among/` : undefined;
+    if (!path) {
       this.logger.error('[checkBlockedAmong] DJANGO_API_URL is not configured — denying all invitees');
       return uniqueOtherIds;
     }
 
-    const params = { userId: callerUserId, otherUserIds: uniqueOtherIds.join(',') };
+    // Build the query string once and reuse that exact string for both the
+    // real request and the signature, instead of handing `params` to axios
+    // (its own serializer) AND separately to signedInternalHeaders'
+    // URLSearchParams-based pathWithQuery. Axios's default param serializer
+    // deliberately leaves ',' unescaped (so comma-joined list params like
+    // otherUserIds read naturally), but URLSearchParams.toString() always
+    // percent-encodes it to %2C — two different encodings of the same
+    // params produced two different strings, so the signature Nest
+    // computed never matched what Django's request.get_full_path() saw on
+    // the wire. Every call here 401'd with signature_mismatch regardless
+    // of how fresh the caller's own bearer token was — confirmed live:
+    // GET /calls/join/:token kept failing "session expired" even on a
+    // just-refreshed token, because the real 401 was this internal call,
+    // not anything wrong with the user's own auth.
+    const query = new URLSearchParams({
+      userId: callerUserId,
+      otherUserIds: uniqueOtherIds.join(','),
+    }).toString();
+    const url = `${path}?${query}`;
     try {
       const res = await firstValueFrom(
         this.http.get<{ blockedUserIds?: string[] }>(url, {
-          headers: signedInternalHeaders({ method: 'GET', url, params, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
-          params,
+          headers: signedInternalHeaders({ method: 'GET', url, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
           timeout: 5000,
         }),
       );

@@ -2,6 +2,7 @@ import { of, throwError } from 'rxjs'
 import { UnauthorizedException } from '@nestjs/common'
 import { DjangoConversationClient } from './django-conversation.client'
 import { SocketPrincipal } from '../../chat.types'
+import { verifyInternalSignature } from '../../../security/internal-signing'
 
 process.env.DJANGO_API_URL = 'https://django.internal.test/api/v1'
 process.env.DJANGO_INTERNAL_TOKEN = 'internal-test-token'
@@ -184,8 +185,46 @@ describe('DjangoConversationClient.checkBlockedAmong — standalone call block c
 
     await client.checkBlockedAmong('user-1', ['user-2', 'user-2', 'user-3'])
 
-    const [, config] = http.get.mock.calls[0]
-    expect(config.params.otherUserIds).toBe('user-2,user-3')
+    const [url] = http.get.mock.calls[0]
+    expect(url).toContain('otherUserIds=user-2%2Cuser-3')
+  })
+
+  // REGRESSION: previously built the signature over a URLSearchParams-
+  // encoded query string (percent-encoding ',' as %2C) while handing axios
+  // a SEPARATE, un-encoded `params` object for the real request - axios's
+  // own default param serializer deliberately leaves ',' unescaped, so the
+  // two encodings diverged and Django's signature check (which re-derives
+  // the payload from request.get_full_path(), i.e. the literal wire query
+  // string) rejected every call with signature_mismatch -> 401. This
+  // surfaced to users as calls/join/:token's checkBlockedAmong call always
+  // failing closed with "Call not allowed" / a misleading "session
+  // expired" message, regardless of how fresh the caller's own token was.
+  it('REGRESSION: signs the exact URL string that is actually sent (no separate axios `params`)', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { blockedUserIds: [] } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.checkBlockedAmong('user-1', ['user-2', 'user-3']);
+
+    const [url, config] = http.get.mock.calls[0]
+    // A separate `params` option alongside a url that already has a query
+    // string would make axios double-append/duplicate them - the fix
+    // relies on exactly one encoding step producing the signed string.
+    expect(config.params).toBeUndefined()
+
+    // Real HTTP servers (Fastify/Express) normalize incoming header names to
+    // lowercase before verifyInternalSignature ever sees them - mirror that
+    // here, since the plain object signedInternalHeaders built keeps the
+    // mixed-case constants (X-Internal-Timestamp, etc.) as-is.
+    const lowerHeaders = Object.fromEntries(
+      Object.entries(config.headers).map(([key, value]) => [key.toLowerCase(), value]),
+    )
+    const verdict = verifyInternalSignature({
+      method: 'GET',
+      url,
+      headers: lowerHeaders as Record<string, string>,
+      secret: process.env.DJANGO_INTERNAL_TOKEN as string,
+    })
+    expect(verdict).toEqual({ ok: true, reason: 'ok' })
   })
 })
 
