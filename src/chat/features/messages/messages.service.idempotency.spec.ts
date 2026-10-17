@@ -29,7 +29,7 @@ describe('MessagesService.createIdempotent — reused flag', () => {
     // had no way to know that and always fired the side effects anyway.
     const existingDoc = { id: 'existing-id', conversationId: 'conv-1', clientId: 'client-1', createdAt: new Date() }
     const model = makeMessageModel(existingDoc)
-    const service = new MessagesService(model as any, {} as any)
+    const service = new MessagesService(model as any, {} as any, {} as any)
 
     const result = await service.createIdempotent(baseArgs)
 
@@ -39,7 +39,7 @@ describe('MessagesService.createIdempotent — reused flag', () => {
 
   it('reports reused=false for a genuinely new message', async () => {
     const model = makeMessageModel(null)
-    const service = new MessagesService(model as any, {} as any)
+    const service = new MessagesService(model as any, {} as any, {} as any)
 
     const result = await service.createIdempotent(baseArgs)
 

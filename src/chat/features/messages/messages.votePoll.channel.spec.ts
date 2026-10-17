@@ -12,7 +12,11 @@ import { Model, connect, Connection } from 'mongoose';
 import { Message, MessageSchema, MessageDocument } from './schemas/message.schema';
 import { MessagesService } from './messages.service';
 
-const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_updates_test';
+// Own database - see reactions.channel.spec.ts's identical comment for
+// why these three real-Mongo spec files can't share one database name
+// (they used to, and raced each other's dropDatabase() calls whenever
+// Jest ran them as separate parallel workers).
+const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_votepoll_channel_test';
 
 describe('MessagesService.votePoll (real Mongo, Channel-shaped conversation)', () => {
   let mongoConnection: Connection;
@@ -29,7 +33,7 @@ describe('MessagesService.votePoll (real Mongo, Channel-shaped conversation)', (
     // Nest's TestingModule/DI container avoids having to stand up its
     // other constructor dependency (UploadIntent's model) purely to
     // satisfy the injector for a method that never uses it.
-    service = new MessagesService(messageModel, {} as any);
+    service = new MessagesService(messageModel, {} as any, {} as any);
   });
 
   afterEach(async () => {
@@ -290,7 +294,7 @@ describe('MessagesService.votePoll (real Mongo, Channel-shaped conversation)', (
   // payload must be rejected server-side regardless of what the mobile
   // app's own PollModal already validated.
   describe('poll creation payload validation (assertValidPollPayload)', () => {
-    const makeService = () => new MessagesService(messageModel, {} as any);
+    const makeService = () => new MessagesService(messageModel, {} as any, {} as any);
 
     it('rejects a poll with fewer than 2 options', () => {
       const svc: any = makeService();
@@ -330,7 +334,7 @@ describe('MessagesService.votePoll (real Mongo, Channel-shaped conversation)', (
   // Event date/time fix (requirement 2B): re-validated server-side,
   // independent of whatever the mobile date/time pickers already enforce.
   describe('event payload validation (assertValidEventPayload)', () => {
-    const makeService = () => new MessagesService(messageModel, {} as any);
+    const makeService = () => new MessagesService(messageModel, {} as any, {} as any);
 
     it('rejects a malformed startsAt', () => {
       const svc: any = makeService();

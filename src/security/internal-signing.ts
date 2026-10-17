@@ -22,7 +22,21 @@ export function internalSignaturesRequired() {
 }
 
 function stableStringify(value: unknown, parseJsonString = false): string {
-  if (value === null || value === undefined) return '';
+  // Only ever reached for a value NESTED inside a larger body (bodyHash
+  // below special-cases an entirely-absent top-level body before this
+  // function is called at all, matching Django's canonical_body_hash,
+  // which treats None/b""/"" as the hash of an empty string). A null
+  // INSIDE a structure (e.g. {"parent_id": null}, which every top-level
+  // StatusComment reply gets) must serialize as the JSON literal "null" -
+  // Python's json.dumps(None) inside a larger object always produces
+  // "null", never empty. This previously returned '' here regardless of
+  // nesting, silently corrupting the canonical form into invalid JSON
+  // ({"parent_id":}) and producing a body hash that could never match
+  // Django's for any payload containing a null field anywhere in it -
+  // confirmed live in production via the new status-discussion broadcast
+  // endpoint (StatusComment.parent_id is null for every top-level
+  // comment), which 401'd with signature_mismatch on every single call.
+  if (value === null || value === undefined) return 'null';
   if (Buffer.isBuffer(value)) return stableStringify(value.toString('utf8'), true);
   if (typeof value === 'string') {
     if (parseJsonString) {
@@ -48,6 +62,15 @@ function stableStringify(value: unknown, parseJsonString = false): string {
 }
 
 function bodyHash(body: unknown) {
+  // An entirely-absent body (no body at all, or an empty string) hashes
+  // as the empty string - matching Django's canonical_body_hash, which
+  // special-cases None/b""/"" the same way before ever calling json.dumps.
+  // This must happen here, BEFORE stableStringify, which (correctly, see
+  // its own comment) treats a null/undefined found NESTED inside a body
+  // differently from a wholly-missing body.
+  if (body === null || body === undefined || body === '') {
+    return crypto.createHash('sha256').update('').digest('hex');
+  }
   return crypto
     .createHash('sha256')
     .update(stableStringify(body, typeof body === 'string'))

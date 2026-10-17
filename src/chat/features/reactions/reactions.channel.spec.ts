@@ -19,7 +19,17 @@ import { Model, connect, Connection } from 'mongoose';
 import { Message, MessageSchema, MessageDocument } from '../messages/schemas/message.schema';
 import { ReactionsService } from './reactions.service';
 
-const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_updates_test';
+// Own database, not shared with pins.service.spec.ts/messages.votePoll.
+// channel.spec.ts (which previously all hardcoded this same
+// 'kis_nest_updates_test' name) - each file's afterAll calls
+// mongoConnection.dropDatabase() independently, and Jest runs separate
+// spec files in parallel worker processes by default, so three files
+// racing dropDatabase()/writes against ONE real shared database produced
+// exactly the symptoms seen running the full suite ("database is
+// currently being dropped", "this.messageModel.find is not a function"
+// from a connection torn down mid-test) despite every one of these tests
+// passing cleanly in isolation.
+const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_reactions_channel_test';
 
 describe('ReactionsService (real Mongo, Channel-shaped conversation)', () => {
   let mongoConnection: Connection;

@@ -18,7 +18,7 @@ function buildMessageModelMock(save = jest.fn().mockResolvedValue(undefined)) {
 describe('MessagesService bible_game_stats kind', () => {
   it('persists a game-scope bibleGameStats payload', async () => {
     const { MessageModelMock, save } = buildMessageModelMock()
-    const service = new MessagesService(MessageModelMock, {} as any)
+    const service = new MessagesService(MessageModelMock, {} as any, {} as any)
 
     await service.createIdempotentLegacy({
       senderId: 'user-1',
@@ -49,7 +49,7 @@ describe('MessagesService bible_game_stats kind', () => {
 
   it('persists a general-scope bibleGameStats payload', async () => {
     const { MessageModelMock, save } = buildMessageModelMock()
-    const service = new MessagesService(MessageModelMock, {} as any)
+    const service = new MessagesService(MessageModelMock, {} as any, {} as any)
 
     await service.createIdempotentLegacy({
       senderId: 'user-1',
@@ -74,7 +74,7 @@ describe('MessagesService bible_game_stats kind', () => {
 
   it('rejects bible_game_stats kind with no bibleGameStats payload', async () => {
     const { MessageModelMock } = buildMessageModelMock()
-    const service = new MessagesService(MessageModelMock, {} as any)
+    const service = new MessagesService(MessageModelMock, {} as any, {} as any)
 
     await expect(
       service.createIdempotentLegacy({
@@ -87,7 +87,7 @@ describe('MessagesService bible_game_stats kind', () => {
 
   it('rejects a bibleGameStats payload attached to an unrelated kind', async () => {
     const { MessageModelMock } = buildMessageModelMock()
-    const service = new MessagesService(MessageModelMock, {} as any)
+    const service = new MessagesService(MessageModelMock, {} as any, {} as any)
 
     await expect(
       service.createIdempotentLegacy({

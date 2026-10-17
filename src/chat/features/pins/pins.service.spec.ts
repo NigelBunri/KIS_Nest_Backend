@@ -11,7 +11,11 @@ import { Pin, PinSchema, PinDocument } from './pin.schema';
 import { Message, MessageSchema, MessageDocument } from '../messages/schemas/message.schema';
 import { PinsService } from './pins.service';
 
-const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_updates_test';
+// Own database - see reactions.channel.spec.ts's identical comment for
+// why these three real-Mongo spec files can't share one database name
+// (they used to, and raced each other's dropDatabase() calls whenever
+// Jest ran them as separate parallel workers).
+const TEST_MONGO_URI = process.env.TEST_MONGO_URI || 'mongodb://localhost:27017/kis_nest_pins_test';
 
 describe('PinsService.setPinned (real Mongo)', () => {
   let mongoConnection: Connection;

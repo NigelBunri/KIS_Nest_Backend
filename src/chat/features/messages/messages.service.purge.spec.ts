@@ -1,10 +1,19 @@
 import { MessagesService } from './messages.service'
 
+// purgeMessagesForUser now does a find().lean().exec() pass (to capture
+// attachment keys for storage.deleteFile) BEFORE updateMany - see the
+// identical note in messages.service.retention.spec.ts for why these
+// mocks previously lacked it entirely.
+const makeLeanExec = (result: unknown) => ({
+  lean: jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue(result) }),
+})
+
 describe('MessagesService.purgeMessagesForUser', () => {
   it('scrubs every non-deleted message from the user and returns the distinct conversation ids touched', async () => {
     const distinct = jest.fn().mockResolvedValue(['conv-1', 'conv-2'])
+    const find = jest.fn().mockReturnValue(makeLeanExec([]))
     const updateMany = jest.fn().mockResolvedValue({ modifiedCount: 7 })
-    const service = new MessagesService({ distinct, updateMany } as any, {} as any)
+    const service = new MessagesService({ distinct, find, updateMany } as any, {} as any, {} as any)
 
     const result = await service.purgeMessagesForUser('user-1')
 
@@ -32,8 +41,9 @@ describe('MessagesService.purgeMessagesForUser', () => {
 
   it('returns zero scrubbed when the user has no messages', async () => {
     const distinct = jest.fn().mockResolvedValue([])
+    const find = jest.fn().mockReturnValue(makeLeanExec([]))
     const updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
-    const service = new MessagesService({ distinct, updateMany } as any, {} as any)
+    const service = new MessagesService({ distinct, find, updateMany } as any, {} as any, {} as any)
 
     const result = await service.purgeMessagesForUser('user-with-no-messages')
 
@@ -42,8 +52,9 @@ describe('MessagesService.purgeMessagesForUser', () => {
 
   it('never touches messages already deleted', async () => {
     const distinct = jest.fn().mockResolvedValue([])
+    const find = jest.fn().mockReturnValue(makeLeanExec([]))
     const updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
-    const service = new MessagesService({ distinct, updateMany } as any, {} as any)
+    const service = new MessagesService({ distinct, find, updateMany } as any, {} as any, {} as any)
 
     await service.purgeMessagesForUser('user-1')
 
