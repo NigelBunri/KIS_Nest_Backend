@@ -72,6 +72,7 @@ export const rooms = {
   userRoom: (userId: string) => `user:${userId}`,
   convRoom: (conversationId: string) => `conv:${conversationId}`,
   threadRoom: (threadId: string) => `thread:${threadId}`,
+  statusRoom: (statusId: string) => `status:${statusId}`,
 }
 
 /* =========================
@@ -278,6 +279,15 @@ export const EVT = {
   // Device management (server → client response events)
   USER_DEVICES_LIST: 'user.devices_list',
   USER_DEVICE_REMOVED: 'user.device_removed',
+
+  // Status discussion (reactions/comments on a status - see
+  // apps/statuses/views.py on the Django side, which owns the actual
+  // data; this room is purely a live-update channel for whoever has the
+  // status's interaction sheet open).
+  STATUS_JOIN: 'status.join',
+  STATUS_LEAVE: 'status.leave',
+  STATUS_REACTION_CHANGED: 'status.reaction_changed',
+  STATUS_COMMENT_ADDED: 'status.comment_added',
 } as const
 
 export type EventKey = (typeof EVT)[keyof typeof EVT]

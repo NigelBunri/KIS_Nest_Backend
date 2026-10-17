@@ -15,6 +15,7 @@ import { registerDisappearingHandlers, type DisappearingDeps } from './disappear
 import { registerPollHandlers, type PollsDeps } from './polls'
 import { registerGroupHandlers, type GroupsDeps } from './groups'
 import { registerSfuHandlers, type SfuDeps } from './sfu'
+import { registerStatusDiscussionHandlers, type StatusDiscussionDeps } from './statusDiscussions'
 
 const HANDLERS_REGISTERED_KEY = 'kisRealtimeHandlersRegistered'
 
@@ -37,6 +38,7 @@ export type HandlersDeps =
   & PollsDeps
   & GroupsDeps
   & SfuDeps
+  & StatusDiscussionDeps
 
 /**
  * Register all realtime socket handlers on a connected socket
@@ -65,6 +67,7 @@ export function registerRealtimeHandlers(
   registerDisappearingHandlers(server, socket, deps)
   registerPollHandlers(server, socket, deps)
   registerGroupHandlers(server, socket, deps)
+  registerStatusDiscussionHandlers(server, socket, deps)
   registerSfuHandlers(server, socket, {
     sfuService: deps.sfuService,
     callsService: deps.callsService as any,

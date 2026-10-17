@@ -35,6 +35,11 @@ type CommunityEventPayload = {
   data?: Record<string, unknown>
 }
 
+type StatusDiscussionBroadcastPayload = {
+  event?: string
+  payload?: Record<string, unknown>
+}
+
 @Controller('internal')
 @UseGuards(InternalAuthGuard)
 export class RealtimeInternalController {
@@ -312,5 +317,32 @@ export class RealtimeInternalController {
     }
 
     return { ok: true, found }
+  }
+
+  // Django's status discussion endpoints (apps/statuses/views.py's
+  // react/unreact/comments actions - see notify_status_discussion_event)
+  // call this after a successful write so any client with that status's
+  // interaction sheet open (joined via status.join - see
+  // realtime/handlers/statusDiscussions.ts) sees the change live.
+  // Best-effort from Django's side already (fire-and-forget, swallows its
+  // own failures) - this endpoint just does the room emit; it never
+  // touches any persisted data itself, since Django already is the
+  // authoritative store for reactions/comments.
+  @Post('status-discussions/:statusId/broadcast')
+  statusDiscussionBroadcast(
+    @Param('statusId') statusId: string,
+    @Body() body: StatusDiscussionBroadcastPayload,
+  ) {
+    const cleanStatusId = String(statusId || '').trim()
+    const event = String(body?.event || '').trim()
+    if (!cleanStatusId || !event) {
+      throw new BadRequestException('statusId and event are required.')
+    }
+
+    try {
+      this.gateway.server?.to(rooms.statusRoom(cleanStatusId)).emit(event, body?.payload ?? {})
+    } catch {}
+
+    return { ok: true }
   }
 }

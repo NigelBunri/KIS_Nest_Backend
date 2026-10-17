@@ -35,7 +35,15 @@ export function registerReactionHandlers(server: Server, socket: Socket, deps: R
 
     try {
       await deps.rateLimitService.assert(principal, `react:${conversationId}`, 120)
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      const perms = await deps.djangoConversationClient.assertMember(principal, conversationId)
+      // ChatInfoPage.tsx's "Only admins can react" toggle (ConversationSettings.
+      // reactions_admin_only) - previously persisted to AsyncStorage only and
+      // never actually enforced anywhere, so toggling it had no real effect
+      // beyond a per-device UI label. canReact is computed server-side in
+      // Django's ws_perms (same place/pattern as canSend's admins-only gate).
+      if (perms?.canReact === false) {
+        return safeAck(ack, err('Only admins can react in this group', 'FORBIDDEN'))
+      }
       if (deps.moderationService) {
         await deps.moderationService.assertAllowed({
           conversationId,

@@ -283,3 +283,47 @@ describe('RealtimeInternalController.sendMessageAsUser', () => {
     expect(result.ok).toBe(true)
   })
 })
+
+describe('RealtimeInternalController.statusDiscussionBroadcast', () => {
+  it('emits the given event+payload to the status room', () => {
+    const { gateway, to, emit } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    const result = controller.statusDiscussionBroadcast('status-1', {
+      event: 'status.reaction_changed',
+      payload: { statusId: 'status-1', userId: 'user-1', emoji: '❤️' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(to).toHaveBeenCalledWith('status:status-1')
+    expect(emit).toHaveBeenCalledWith(
+      'status.reaction_changed',
+      expect.objectContaining({ statusId: 'status-1', userId: 'user-1', emoji: '❤️' }),
+    )
+  })
+
+  it('rejects a missing statusId or event', () => {
+    const { gateway } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    expect(() => controller.statusDiscussionBroadcast('', { event: 'status.reaction_changed' })).toThrow(
+      'statusId and event are required.',
+    )
+    expect(() => controller.statusDiscussionBroadcast('status-1', {})).toThrow(
+      'statusId and event are required.',
+    )
+  })
+
+  it('does not throw when the gateway server is unavailable', () => {
+    const controller = new RealtimeInternalController(
+      { server: null } as any,
+      {} as any,
+      makeMessagesService(),
+      {} as any,
+      {} as any,
+    )
+
+    const result = controller.statusDiscussionBroadcast('status-1', { event: 'status.comment_added' })
+    expect(result).toEqual({ ok: true })
+  })
+})

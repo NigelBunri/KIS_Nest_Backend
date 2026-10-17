@@ -16,6 +16,7 @@ export interface DjangoWsPermsResponse {
   isBlocked: boolean;
   role?: string;
   canSend?: boolean;
+  canReact?: boolean;
   scopes?: ConversationPermission[];
 }
 
@@ -85,6 +86,17 @@ export class DjangoConversationClient {
   // chat expects the NEXT message to stay silent, not whatever's left of a
   // 30s membership cache window.
   private readonly mutedMemberIdsTtlMs = 10_000;
+
+  private readonly canViewStatusCache = new Map<
+    string,
+    { expiresAt: number; canView: boolean }
+  >();
+  // Short TTL - a status's audience/block state can change (e.g. the
+  // viewer gets blocked right after joining the room), and this cache
+  // only gates the initial room join, not any individual read/write
+  // (those re-check can_view_status on every single Django REST call
+  // regardless of this cache).
+  private readonly canViewStatusTtlMs = 15_000;
 
   /**
    * Fetch conversation-scoped permissions from Django
@@ -520,6 +532,47 @@ export class DjangoConversationClient {
     }
   }
 
+  /**
+   * Whether `userId` is allowed to see `statusId` (apps.statuses.services.
+   * can_view_status, via StatusViewSet.can_view - internal-auth only).
+   * Used by status.join (see realtime/handlers/statusDiscussions.ts)
+   * before letting a socket subscribe to that status's live reaction/
+   * comment room - without this, anyone could join status:{id} by guessing
+   * an id and eavesdrop on its discussion even though every REST endpoint
+   * for it is locked down to the author's audience.
+   */
+  async canViewStatus(userId: string, statusId: string): Promise<boolean> {
+    const cacheKey = `${userId}:${statusId}`;
+    const now = Date.now();
+    const cached = this.canViewStatusCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.canView;
+    }
+
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/statuses/${statusId}/can-view/?user_id=${encodeURIComponent(userId)}` : undefined;
+    if (!url) return false;
+
+    try {
+      const res = await firstValueFrom(
+        this.http.get<{ can_view?: boolean }>(url, {
+          headers: {
+            ...signedInternalHeaders({ method: 'GET', url, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
+          },
+          timeout: 5000,
+        }),
+      );
+      const canView = Boolean(res?.data?.can_view);
+      this.canViewStatusCache.set(cacheKey, { expiresAt: now + this.canViewStatusTtlMs, canView });
+      return canView;
+    } catch {
+      // Fail closed (unlike getMutedMemberIds's fail-open) - this gates
+      // access to a private discussion room, so an unreachable Django is
+      // "can't confirm you're allowed in", not "let everyone in".
+      return false;
+    }
+  }
+
   async policyCheck(args: {
     principal: SocketPrincipal;
     conversationId: string;
@@ -703,7 +756,7 @@ export class DjangoConversationClient {
   }
 
   private buildBroadcastPerms(): DjangoWsPermsResponse {
-    return { isMember: true, isBlocked: false, canSend: true };
+    return { isMember: true, isBlocked: false, canSend: true, canReact: true };
   }
 
   private djangoApiBase(): string | undefined {
