@@ -105,6 +105,58 @@ describe('sfu.join', () => {
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
   })
 
+  it('lets a non-member who joined via invite link reach real media on a conversation-backed call', async () => {
+    // A non-member admitted into an already-active call via calls.ts's
+    // CALL_KNOCK/CALL_KNOCK_ADMIT (now also invite-link-aware) still hit
+    // assertMember here unconditionally for a real (non-standalone)
+    // conversationId - so once a group call upgraded to the SFU, they
+    // could never actually reach live audio/video, only the P2P mesh.
+    const { socket, handlers } = makeSocket('invite-guest')
+    const sfuService = makeSfuService()
+    const assertMember = jest.fn().mockRejectedValue(new Error('Not a conversation member'))
+    const hasActiveInviteToken = jest.fn().mockResolvedValue(true)
+    const deps: SfuDeps = {
+      sfuService: sfuService as any,
+      djangoConversationClient: { assertMember } as any,
+      callsService: {
+        getCall: jest.fn().mockResolvedValue({
+          participants: [{ userId: 'invite-guest', status: 'joined' }],
+        }),
+        hasActiveInviteToken,
+      },
+    }
+    registerSfuHandlers(makeServer(), socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get(EVT.SFU_JOIN)!({ callId: 'call-1', conversationId: 'conv-1' }, ack)
+
+    expect(assertMember).toHaveBeenCalled()
+    expect(hasActiveInviteToken).toHaveBeenCalledWith('conv-1', 'call-1')
+    expect(sfuService.authorizePeer).toHaveBeenCalledWith('call-1', 'invite-guest')
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+  })
+
+  it('still rejects a non-member with no active invite token on a conversation-backed call', async () => {
+    const { socket, handlers } = makeSocket('stranger')
+    const sfuService = makeSfuService()
+    const assertMember = jest.fn().mockRejectedValue(new Error('Not a conversation member'))
+    const deps: SfuDeps = {
+      sfuService: sfuService as any,
+      djangoConversationClient: { assertMember } as any,
+      callsService: {
+        getCall: jest.fn(),
+        hasActiveInviteToken: jest.fn().mockResolvedValue(false),
+      },
+    }
+    registerSfuHandlers(makeServer(), socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get(EVT.SFU_JOIN)!({ callId: 'call-1', conversationId: 'conv-1' }, ack)
+
+    expect(sfuService.authorizePeer).not.toHaveBeenCalled()
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false }))
+  })
+
   it('rejects a removed participant (status "left")', async () => {
     const { socket, handlers } = makeSocket('left-user')
     const sfuService = makeSfuService()

@@ -35,6 +35,7 @@ export interface SfuDeps {
     getCall(conversationId: string, callId: string): Promise<{
       participants?: Array<{ userId: string; status: string }>
     } | null>
+    hasActiveInviteToken?(conversationId: string, callId: string): Promise<boolean>
   }
   djangoConversationClient: RoomsDeps['djangoConversationClient']
   rateLimitService?: { assert(p: any, key: string, limit?: number): Promise<void> | void }
@@ -61,8 +62,22 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
       // invite-link or scheduled call, including for the call's own host.
       // The CallSession participant check below is the real authority here
       // (same standalone-skip pattern as createCallHandler in calls.ts).
+      //
+      // A CONVERSATION-backed call (not standalone) that a non-member
+      // joined through a valid shared invite link hit the same bug:
+      // assertMember still unconditionally threw for them here even after
+      // they'd been knocked-in and admitted (calls.ts's CALL_KNOCK/
+      // CALL_KNOCK_ADMIT, now also invite-link-aware) — so once a group
+      // call upgraded to the SFU, an admitted invite-link guest could
+      // never actually reach live audio/video, only the P2P mesh. Same
+      // fallback as every other invite-link-aware handler in calls.ts.
       if (!conversationId.startsWith('standalone:')) {
-        await djangoConversationClient.assertMember(principal, conversationId)
+        try {
+          await djangoConversationClient.assertMember(principal, conversationId)
+        } catch (membershipError) {
+          const isInviteLinkEligible = !!(await callsService.hasActiveInviteToken?.(conversationId, callId))
+          if (!isInviteLinkEligible) throw membershipError
+        }
       }
 
       // assertMember only proves the caller belongs to SOME conversation they

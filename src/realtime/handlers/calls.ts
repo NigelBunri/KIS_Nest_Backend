@@ -1189,8 +1189,25 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
       // Unlike every other handler in this function, this one had no
       // membership check at all - any authenticated user (not just a
       // conversation member) could broadcast into an arbitrary
-      // conversation's room via this event.
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      // conversation's room via this event. Fixed by requiring
+      // membership - but, same bug class as createCallHandler's
+      // CALL_ANSWER bypass and call.waiting.join above, that fix alone
+      // left a non-member who joined a conversation-backed call through
+      // a valid shared invite link (GET /calls/join/:token) with no way
+      // to even knock on an ALREADY-ACTIVE call: assertMember always
+      // threw for them, and unlike call.waiting.join (the pre-host
+      // waiting-room path, which already has this fallback) this
+      // mid-call knock path never checked for an active invite token
+      // before giving up - so they were never even offered the chance to
+      // wait for the host to admit them.
+      if (!conversationId.startsWith('standalone:')) {
+        try {
+          await deps.djangoConversationClient.assertMember(principal, conversationId)
+        } catch (membershipError) {
+          const isInviteLinkEligible = !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+          if (!isInviteLinkEligible) throw membershipError
+        }
+      }
       await deps.callsService?.addKnocker?.(conversationId, callId, principal.userId)
 
       // Broadcast knock request to all conv participants so the host sees it
