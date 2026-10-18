@@ -136,6 +136,37 @@ describe('sfu.join', () => {
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
   })
 
+  it('lets a non-member who was personally invited via call.invite reach real media', async () => {
+    // Companion to the invite-link case above, for the OTHER way a
+    // non-member legitimately ends up on an active call: call.invite's
+    // "Add to call" picker, not a shared link. hasActiveInviteToken alone
+    // doesn't cover this — isInvitedParticipant does.
+    const { socket, handlers } = makeSocket('direct-invitee')
+    const sfuService = makeSfuService()
+    const assertMember = jest.fn().mockRejectedValue(new Error('Not a conversation member'))
+    const hasActiveInviteToken = jest.fn().mockResolvedValue(false)
+    const isInvitedParticipant = jest.fn().mockResolvedValue(true)
+    const deps: SfuDeps = {
+      sfuService: sfuService as any,
+      djangoConversationClient: { assertMember } as any,
+      callsService: {
+        getCall: jest.fn().mockResolvedValue({
+          participants: [{ userId: 'direct-invitee', status: 'joined' }],
+        }),
+        hasActiveInviteToken,
+        isInvitedParticipant,
+      },
+    }
+    registerSfuHandlers(makeServer(), socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get(EVT.SFU_JOIN)!({ callId: 'call-1', conversationId: 'conv-1' }, ack)
+
+    expect(isInvitedParticipant).toHaveBeenCalledWith('conv-1', 'call-1', 'direct-invitee')
+    expect(sfuService.authorizePeer).toHaveBeenCalledWith('call-1', 'direct-invitee')
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+  })
+
   it('still rejects a non-member with no active invite token on a conversation-backed call', async () => {
     const { socket, handlers } = makeSocket('stranger')
     const sfuService = makeSfuService()

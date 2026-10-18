@@ -842,6 +842,26 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     return !!call?.inviteToken && call.status !== 'ended' && call.status !== 'missed'
   }
 
+  /**
+   * Whether `userId` was personally invited onto this call by an existing
+   * member (the call.invite handler's $push of a {status: 'invited'}
+   * participant row) — the same "not a Django member of conversationId,
+   * but still legitimately allowed onto THIS call" gate as
+   * hasActiveInviteToken above, for the other way a non-member ends up with
+   * a reason to join: being invited directly rather than following a
+   * shared link. Without this, inviting someone to a group call via
+   * call.invite would ring their phone and let them tap Answer, but their
+   * own call.answer/sfu.join would then fail assertMember and get rejected
+   * right back out — the invite push lied about them being able to join.
+   */
+  async isInvitedParticipant(conversationId: string, callId: string, userId: string): Promise<boolean> {
+    const call = await this.calls.findOne(
+      { conversationId, callId, 'participants.userId': userId, 'participants.status': 'invited' },
+      { _id: 1 },
+    ).lean()
+    return !!call
+  }
+
   /** List upcoming scheduled calls for a user. */
   async getScheduledCalls(userId: string): Promise<CallSession[]> {
     const now = new Date()

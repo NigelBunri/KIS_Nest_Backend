@@ -78,6 +78,7 @@ export interface CallsDeps {
     ensureCallExistsOrThrow?(conversationId: string, callId: string): Promise<any>
     getCallCreator?(conversationId: string, callId: string): Promise<string | null>
     hasActiveInviteToken?(conversationId: string, callId: string): Promise<boolean>
+    isInvitedParticipant?(conversationId: string, callId: string, userId: string): Promise<boolean>
     markActive?(conversationId: string, callId: string): Promise<any>
     setParticipantStatus?(
       conversationId: string,
@@ -325,7 +326,8 @@ function createCallHandler(
           isInviteLinkEligible =
             !!callId &&
             (event === EVT.CALL_ANSWER || event === EVT.CALL_ICE || event === EVT.CALL_END) &&
-            !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+            (!!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId)) ||
+              !!(await deps.callsService?.isInvitedParticipant?.(conversationId, callId, principal.userId)))
           if (!isInviteLinkEligible) throw membershipError
         }
       }
@@ -1204,7 +1206,9 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
         try {
           await deps.djangoConversationClient.assertMember(principal, conversationId)
         } catch (membershipError) {
-          const isInviteLinkEligible = !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+          const isInviteLinkEligible =
+            !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId)) ||
+            !!(await deps.callsService?.isInvitedParticipant?.(conversationId, callId, principal.userId))
           if (!isInviteLinkEligible) throw membershipError
         }
       }
@@ -1433,7 +1437,9 @@ function registerJoinBeforeHostHandlers(server: Server, socket: Socket, deps: Ca
           // resolved it through that exact link — the client only gets here
           // from CallJoinScreen's "waiting for host" branch, which is
           // reachable by anyone holding the link, not just members.
-          isInviteLinkEligible = !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId))
+          isInviteLinkEligible =
+            !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId)) ||
+            !!(await deps.callsService?.isInvitedParticipant?.(conversationId, callId, principal.userId))
           if (!isInviteLinkEligible) throw membershipError
         }
       }

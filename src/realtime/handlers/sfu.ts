@@ -36,6 +36,7 @@ export interface SfuDeps {
       participants?: Array<{ userId: string; status: string }>
     } | null>
     hasActiveInviteToken?(conversationId: string, callId: string): Promise<boolean>
+    isInvitedParticipant?(conversationId: string, callId: string, userId: string): Promise<boolean>
   }
   djangoConversationClient: RoomsDeps['djangoConversationClient']
   rateLimitService?: { assert(p: any, key: string, limit?: number): Promise<void> | void }
@@ -75,7 +76,9 @@ export function registerSfuHandlers(server: Server, socket: Socket, deps: SfuDep
         try {
           await djangoConversationClient.assertMember(principal, conversationId)
         } catch (membershipError) {
-          const isInviteLinkEligible = !!(await callsService.hasActiveInviteToken?.(conversationId, callId))
+          const isInviteLinkEligible =
+            !!(await callsService.hasActiveInviteToken?.(conversationId, callId)) ||
+            !!(await callsService.isInvitedParticipant?.(conversationId, callId, principal.userId))
           if (!isInviteLinkEligible) throw membershipError
         }
       }
