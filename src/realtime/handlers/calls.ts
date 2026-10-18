@@ -442,7 +442,26 @@ function createCallHandler(
           const MAX_PARTICIPANTS: Record<string, number> = {
             voice: 2, video: 2, 'voice-group': 100, 'video-group': 32, broadcast: 1000,
           }
-          const cap = MAX_PARTICIPANTS[callToJoin?.callType ?? 'voice'] ?? 2
+          const baseCallType = callToJoin?.callType ?? 'voice'
+          // ROOT CAUSE of "a user can't join an ongoing call": callType is
+          // set once at call creation and never changes, so a 1:1 call that
+          // already has its 2 original parties stayed hard-capped at 2
+          // forever — including for a 3rd person legitimately invited
+          // through call.invite (isInvitedParticipant bypassed the
+          // membership check just above, then THIS cap rejected them
+          // anyway with CALL_FULL, since callToJoin.callType is still
+          // 'voice'/'video'). A 1:1 call that's had anyone invited onto it
+          // already has 3+ participant rows (call.invite's
+          // setParticipantStatus push of their 'invited' row) even before
+          // they answer — use the matching group cap once that's happened,
+          // since the call is no longer genuinely 1:1 in practice.
+          const everEscalated =
+            (baseCallType === 'voice' || baseCallType === 'video') &&
+            (callToJoin?.participants ?? []).length > 2
+          const effectiveCallType = everEscalated
+            ? (baseCallType === 'video' ? 'video-group' : 'voice-group')
+            : baseCallType
+          const cap = MAX_PARTICIPANTS[effectiveCallType] ?? 2
           const currentJoined = (callToJoin?.participants ?? []).filter(
             (p: any) => p.status === 'joined' || p.status === 'connecting',
           ).length

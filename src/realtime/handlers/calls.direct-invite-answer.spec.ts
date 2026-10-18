@@ -115,3 +115,80 @@ describe('call.answer direct-invite bypass (call.invite, not a shared link)', ()
     )
   })
 })
+
+// REAL root cause of "a user can't join an ongoing call": the
+// isInvitedParticipant bypass above only cleared the Django-membership
+// check. A second, independent gate further down createCallHandler's
+// CALL_ANSWER branch — a hardcoded MAX_PARTICIPANTS cap keyed on
+// callToJoin.callType — still rejected a 3rd invited person with
+// CALL_FULL, because a 1:1 call's callType is set once at creation and
+// stays 'voice'/'video' (cap 2) forever, even after someone is
+// legitimately invited onto it.
+describe('call.answer participant cap for a 1:1 call escalated via call.invite', () => {
+  it('lets a 3rd invited participant answer a voice call that already has its 2 original parties joined', async () => {
+    const { socket, handlers } = makeSocket('user-3')
+    const { server } = makeServer()
+    const ack = jest.fn()
+    const deps = makeDeps({
+      djangoConversationClient: {
+        assertMember: jest.fn().mockRejectedValue(new Error('Not a conversation member')),
+        checkBlockedAmong: jest.fn().mockResolvedValue([]),
+      },
+      callsService: {
+        ensureCallExistsOrThrow: jest.fn().mockResolvedValue({
+          createdBy: 'user-1',
+          callType: 'voice',
+          status: 'active',
+          participants: [
+            { userId: 'user-1', status: 'joined' },
+            { userId: 'user-2', status: 'joined' },
+            { userId: 'user-3', status: 'invited' },
+          ],
+        }),
+        hasActiveInviteToken: jest.fn().mockResolvedValue(false),
+        isInvitedParticipant: jest.fn().mockResolvedValue(true),
+        setParticipantStatus: jest.fn(),
+        appendSignal: jest.fn(),
+      } as any,
+    })
+    registerCallHandlers(server as any, socket, deps)
+
+    await handlers.get('call.answer')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(ack).not.toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'CALL_FULL' }))
+    expect((deps.callsService as any).setParticipantStatus).toHaveBeenCalledWith(
+      'conv-123', 'call-1', 'user-3', 'joined',
+    )
+  })
+
+  it('still caps a genuine 1:1 voice call at 2 when nobody was ever invited onto it', async () => {
+    const { socket, handlers } = makeSocket('user-3')
+    const { server } = makeServer()
+    const ack = jest.fn()
+    const deps = makeDeps({
+      djangoConversationClient: {
+        assertMember: jest.fn().mockResolvedValue(undefined),
+        checkBlockedAmong: jest.fn().mockResolvedValue([]),
+      },
+      callsService: {
+        ensureCallExistsOrThrow: jest.fn().mockResolvedValue({
+          createdBy: 'user-1',
+          callType: 'voice',
+          status: 'active',
+          participants: [
+            { userId: 'user-1', status: 'joined' },
+            { userId: 'user-2', status: 'joined' },
+          ],
+        }),
+        setParticipantStatus: jest.fn(),
+        appendSignal: jest.fn(),
+      } as any,
+    })
+    registerCallHandlers(server as any, socket, deps)
+
+    await handlers.get('call.answer')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'CALL_FULL' }))
+    expect((deps.callsService as any).setParticipantStatus).not.toHaveBeenCalled()
+  })
+})
