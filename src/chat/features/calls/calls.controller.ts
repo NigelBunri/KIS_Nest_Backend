@@ -180,6 +180,7 @@ export class CallsController {
       call_type?: string
       title?: string
       scheduled_for?: string
+      duration_minutes?: number
       invitee_user_ids?: string[]
     },
   ) {
@@ -187,15 +188,41 @@ export class CallsController {
     await this.rateLimit.assert(principal.userId, 'call:standalone-create', 20)
     if (!body.call_id) throw new NotFoundException('call_id required')
 
+    const callType = body.call_type ?? 'voice'
+    const inviteeUserIds = (body.invitee_user_ids ?? []).filter((id) => id && id !== principal.userId)
+
+    // A broadcast needs at least one panelist alongside the host (a
+    // "broadcast" with only the host present is just a voice/video call
+    // with extra UI) and is capped the same way the mobile picker caps it
+    // client-side — checked again here since the client isn't the only
+    // possible caller of this endpoint.
+    if (callType === 'broadcast') {
+      if (inviteeUserIds.length < 1) {
+        throw new BadRequestException('A broadcast needs at least 1 panelist.')
+      }
+      if (inviteeUserIds.length > 30) {
+        throw new BadRequestException('A broadcast can have at most 30 panelists.')
+      }
+    }
+
     const scheduledFor = body.scheduled_for ? new Date(body.scheduled_for) : null
+    // Only meaningful for a scheduled call — an instant ("now") call has no
+    // planned end, so a client-sent duration for one is silently ignored
+    // rather than rejected (mirrors createStandaloneCall's own storage
+    // rule: scheduledDurationMinutes is forced null whenever scheduledFor
+    // is null).
+    const durationMinutes = scheduledFor && Number.isFinite(body.duration_minutes)
+      ? Math.min(1440, Math.max(5, Math.round(body.duration_minutes!)))
+      : null
 
     const call = await this.callsService.createStandaloneCall({
       callId: body.call_id,
       createdBy: principal.userId,
-      callType: body.call_type ?? 'voice',
+      callType,
       title: body.title ?? 'Call',
       scheduledFor,
-      inviteeUserIds: body.invitee_user_ids,
+      scheduledDurationMinutes: durationMinutes,
+      inviteeUserIds,
     })
 
     return {
@@ -205,6 +232,7 @@ export class CallsController {
       callType: call.callType,
       title: call.title,
       scheduledFor: call.scheduledFor,
+      scheduledDurationMinutes: call.scheduledDurationMinutes,
       isStandalone: call.isStandalone,
     }
   }
@@ -243,6 +271,7 @@ export class CallsController {
       status: call.status,
       isStandalone: call.isStandalone,
       scheduledFor: call.scheduledFor,
+      scheduledDurationMinutes: call.scheduledDurationMinutes,
       participantCount: call.participants.length,
       createdBy: call.createdBy,
       isHost: call.createdBy === principal.userId,
@@ -263,6 +292,7 @@ export class CallsController {
         callType: c.callType,
         title: c.title,
         scheduledFor: c.scheduledFor,
+        scheduledDurationMinutes: c.scheduledDurationMinutes,
         isStandalone: c.isStandalone,
         inviteToken: c.inviteToken,
         participantCount: c.participants.length,

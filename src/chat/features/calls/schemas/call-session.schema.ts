@@ -135,6 +135,15 @@ export class CallSession {
   @Prop({ type: Date, default: null })
   scheduledFor!: Date | null;
 
+  // Planned length in minutes for a scheduled call (5–1440, i.e. 5 min to
+  // 24 h) — informational only (shown on the "Upcoming" list/invite so
+  // invitees know how long to block out); never enforced as a hard
+  // server-side cutoff, same as scheduledFor itself isn't enforced beyond
+  // gating when a host can start the call. null for an instant ("now")
+  // call, which has no planned duration at all.
+  @Prop({ type: Number, default: null })
+  scheduledDurationMinutes!: number | null;
+
   // Users currently knocking to join (broadcast/locked calls)
   @Prop({ type: [String], default: [] })
   knockingUserIds!: string[];

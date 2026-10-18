@@ -30,6 +30,7 @@ type StandaloneCallArgs = {
   callType: string
   title: string
   scheduledFor?: Date | null
+  scheduledDurationMinutes?: number | null
   inviteeUserIds?: string[]
 }
 
@@ -792,6 +793,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       title: args.title,
       inviteToken,
       scheduledFor: args.scheduledFor ?? null,
+      scheduledDurationMinutes: args.scheduledFor ? (args.scheduledDurationMinutes ?? null) : null,
       knockingUserIds: [],
     })
 
