@@ -189,10 +189,21 @@ export const EVT = {
   CALL_KNOCK_REQUEST: 'call.knock.request',   // host receives this
   CALL_KNOCK_ADMIT: 'call.knock.admit',        // host sends this
   CALL_KNOCK_DENY: 'call.knock.deny',          // host sends this
+  CALL_KNOCK_CANCEL: 'call.knock.cancel',          // requester sends this (withdraws)
+  CALL_KNOCK_CANCELLED: 'call.knock.cancelled',    // conv room receives this
 
   // Co-host / role promotion
   CALL_PROMOTE: 'call.promote',
   CALL_ROLE_CHANGED: 'call.role.changed',
+
+  // Broadcast panelist/participant grid placement — orthogonal to role
+  // (role governs mic/camera + moderation rights; isPanelist governs
+  // ONLY where someone is shown in a broadcast's UI: the panelist grid
+  // vs the participant strip). Lets a host run a broadcast without
+  // appearing in the panel themselves, and move anyone between the two
+  // groups independently of promoting/demoting their speaking role.
+  CALL_PANELIST_SET: 'call.panelist.set',
+  CALL_PANELIST_CHANGED: 'call.panelist.changed',
 
   // Recording
   CALL_RECORDING_START: 'call.recording.start',

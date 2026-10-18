@@ -256,6 +256,42 @@ export class NotificationsService implements OnModuleInit {
     );
   }
 
+  /**
+   * A knock/admission-request (call.knock) was, until now, delivered to the
+   * host purely via a socket broadcast to the conversation room - if the
+   * host's device wasn't actively connected to that room (app backgrounded,
+   * call screen not mounted), they never learned anyone was waiting. This
+   * gives it the same push fallback every other call-adjacent notification
+   * already gets, so a backgrounded host still sees "X wants to join".
+   */
+  async notifyAdmissionRequest(input: {
+    toUserId: string;
+    requesterUserId: string;
+    requesterDisplayName?: string;
+    conversationId: string;
+    callId: string;
+  }) {
+    const prefs = await this.userPrefsClient.getNotificationPrefs(input.toUserId).catch(() => null);
+    if (prefs?.notif_calls === false) {
+      return { ok: true, delivered: 0, skipped: 'muted_category' };
+    }
+
+    const requesterLabel = (input.requesterDisplayName && String(input.requesterDisplayName).trim()) || 'Someone';
+    return this.notify(
+      { userId: input.toUserId },
+      {
+        title: 'Waiting to join',
+        body: `${requesterLabel} is waiting to join your call`,
+        data: {
+          conversationId: input.conversationId,
+          callId: input.callId,
+          requesterUserId: input.requesterUserId,
+          type: 'call_admission_request',
+        },
+      },
+    );
+  }
+
   async notifyNewMessage(input: {
     toUserId: string;
     conversationId: string;

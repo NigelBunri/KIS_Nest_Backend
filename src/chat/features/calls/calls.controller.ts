@@ -182,6 +182,8 @@ export class CallsController {
       scheduled_for?: string
       duration_minutes?: number
       invitee_user_ids?: string[]
+      /** Broadcast only: does the creator themselves appear in the panelist grid? Default true. */
+      host_is_panelist?: boolean
     },
   ) {
     const principal = await this.resolveUser(req)
@@ -223,6 +225,7 @@ export class CallsController {
       scheduledFor,
       scheduledDurationMinutes: durationMinutes,
       inviteeUserIds,
+      hostIsPanelist: body.host_is_panelist,
     })
 
     return {
@@ -263,6 +266,32 @@ export class CallsController {
       const blockedIds = await this.djangoConversationClient.checkBlockedAmong(principal.userId, [String(call.createdBy)])
       if (blockedIds.length > 0) throw new UnauthorizedException('Call not allowed')
     }
+
+    // Preserve unrestricted joining for the two cases that already have an
+    // inherent trust relationship with this call: the host themselves, and
+    // anyone personally invited onto it (call.invite's $push of a
+    // {status:'invited'} row — see isInvitedParticipant's own doc comment).
+    // Everyone else arrived purely by holding a shared link with no prior
+    // relationship to this call, so for a conversation-backed call they
+    // must already be a member (the existing, pre-link-sharing trust
+    // boundary) or go through admission; a standalone call has no
+    // conversation at all, so a bare link-holder always needs admission.
+    const isHost = call.createdBy === principal.userId
+    let requiresApproval = false
+    if (!isHost) {
+      const alreadyInvited = await this.callsService.isInvitedParticipant(call.conversationId, call.callId, principal.userId)
+      if (!alreadyInvited) {
+        if (call.conversationId.startsWith('standalone:')) {
+          requiresApproval = true
+        } else {
+          const isMember = await this.djangoConversationClient.assertMember(principal, call.conversationId)
+            .then(() => true)
+            .catch(() => false)
+          requiresApproval = !isMember
+        }
+      }
+    }
+
     return {
       callId: call.callId,
       conversationId: call.conversationId,
@@ -274,7 +303,8 @@ export class CallsController {
       scheduledDurationMinutes: call.scheduledDurationMinutes,
       participantCount: call.participants.length,
       createdBy: call.createdBy,
-      isHost: call.createdBy === principal.userId,
+      isHost,
+      requiresApproval,
     }
   }
 
@@ -450,7 +480,20 @@ export class CallsController {
   ) {
     const principal = await this.resolveUser(req)
     if (!body.conversation_id) throw new BadRequestException('conversation_id required')
-    await this.assertConversationMember(principal, body.conversation_id)
+    try {
+      await this.assertConversationMember(principal, body.conversation_id)
+    } catch (membershipError) {
+      // Mirrors the socket call.end handler's own bypass (realtime/handlers
+      // /calls.ts): a contact invited mid-call, or a link-based joiner, is
+      // often not a Django member of this conversation. Without this, the
+      // notification-tray Decline action (the entire point of this REST
+      // endpoint — see its class doc comment) 401s for exactly the
+      // recipients it exists to serve.
+      const bypassEligible =
+        !!(await this.callsService.hasActiveInviteToken?.(body.conversation_id, callId)) ||
+        !!(await this.callsService.isInvitedParticipant?.(body.conversation_id, callId, principal.userId))
+      if (!bypassEligible) throw membershipError
+    }
 
     const existed = await this.callsService.ensureCallExistsOrThrow(body.conversation_id, callId).catch(() => null)
     if (!existed) return // already gone (ended/expired) — nothing to decline, not an error
@@ -462,17 +505,27 @@ export class CallsController {
       'rejected',
       'rejected',
     )
-    await this.callsService.endIfNoActiveParticipants(body.conversation_id, callId)
+    const endedForEveryone = await this.callsService.endIfNoActiveParticipants(body.conversation_id, callId)
 
-    const endedAt = new Date().toISOString()
-    this.chatGateway.server.to(rooms.convRoom(body.conversation_id)).emit(EVT.CALL_END, {
-      callId,
-      conversationId: body.conversation_id,
-      fromUserId: principal.userId,
-      endedBy: principal.userId,
-      endedAt,
-      reason: 'rejected',
-    })
+    // Only broadcast CALL_END room-wide when the decline actually ended the
+    // call for everyone (endIfNoActiveParticipants found no one else still
+    // invited/connecting/joined). Otherwise this participant's exit is
+    // already fully captured by their own participant row - broadcasting
+    // CALL_END here would make every other still-connected participant's
+    // client flip its call state to ended, even though the call is still
+    // active for them (mirrors the socket call.end handler's identical fix
+    // in realtime/handlers/calls.ts - see its comment for the full story).
+    if (endedForEveryone) {
+      const endedAt = new Date().toISOString()
+      this.chatGateway.server.to(rooms.convRoom(body.conversation_id)).emit(EVT.CALL_END, {
+        callId,
+        conversationId: body.conversation_id,
+        fromUserId: principal.userId,
+        endedBy: principal.userId,
+        endedAt,
+        reason: 'rejected',
+      })
+    }
     // Returns 204 No Content implicitly (HttpCode decorator).
   }
 }

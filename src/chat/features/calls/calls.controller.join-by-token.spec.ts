@@ -19,6 +19,8 @@ function makeController(overrides: {
   principal?: any
   call?: any
   blockedIds?: string[]
+  isMember?: boolean
+  alreadyInvited?: boolean
 } = {}) {
   const principal = overrides.principal ?? { userId: 'joiner-1', username: 'Joiner' }
   const authService = { introspect: jest.fn().mockResolvedValue(principal) }
@@ -33,9 +35,14 @@ function makeController(overrides: {
     createdBy: 'host-1',
     participants: [{ userId: 'host-1' }],
   }
-  const callsService = { getCallByToken: jest.fn().mockResolvedValue(call) }
+  const callsService = {
+    getCallByToken: jest.fn().mockResolvedValue(call),
+    isInvitedParticipant: jest.fn().mockResolvedValue(overrides.alreadyInvited ?? false),
+  }
   const djangoConversationClient = {
-    assertMember: jest.fn(),
+    assertMember: overrides.isMember
+      ? jest.fn().mockResolvedValue(undefined)
+      : jest.fn().mockRejectedValue(new Error('Not a conversation member')),
     checkBlockedAmong: jest.fn().mockResolvedValue(overrides.blockedIds ?? []),
   }
   const rateLimit = { assert: jest.fn() }
@@ -88,5 +95,71 @@ describe('CallsController.joinByToken (GET /calls/join/:token)', () => {
     await controller.joinByToken(makeReq(), 'tok-1')
 
     expect(djangoConversationClient.checkBlockedAmong).not.toHaveBeenCalled()
+  })
+
+  describe('requiresApproval', () => {
+    it('is false for the call host themselves', async () => {
+      const { controller } = makeController({ principal: { userId: 'host-1', username: 'Host' } })
+
+      const result = await controller.joinByToken(makeReq(), 'tok-1')
+
+      expect(result).toEqual(expect.objectContaining({ isHost: true, requiresApproval: false }))
+    })
+
+    it('is false for a bare link-holder with no conversation and no prior relationship to a standalone call', async () => {
+      const { controller } = makeController()
+
+      const result = await controller.joinByToken(makeReq(), 'tok-1')
+
+      expect(result).toEqual(expect.objectContaining({ requiresApproval: true }))
+    })
+
+    it('is false for someone personally invited onto the call (call.invite), even without conversation membership', async () => {
+      const { controller } = makeController({ alreadyInvited: true })
+
+      const result = await controller.joinByToken(makeReq(), 'tok-1')
+
+      expect(result).toEqual(expect.objectContaining({ requiresApproval: false }))
+    })
+
+    it('is false for an existing Django conversation member joining a conversation-backed call via link', async () => {
+      const { controller } = makeController({
+        call: {
+          callId: 'call-2',
+          conversationId: 'conv-1',
+          callType: 'voice-group',
+          title: 'Group call',
+          status: 'active',
+          isStandalone: false,
+          createdBy: 'host-1',
+          participants: [{ userId: 'host-1' }],
+        },
+        isMember: true,
+      })
+
+      const result = await controller.joinByToken(makeReq(), 'tok-1')
+
+      expect(result).toEqual(expect.objectContaining({ requiresApproval: false }))
+    })
+
+    it('is true for a non-member, non-invited link-holder on a conversation-backed call', async () => {
+      const { controller } = makeController({
+        call: {
+          callId: 'call-2',
+          conversationId: 'conv-1',
+          callType: 'voice-group',
+          title: 'Group call',
+          status: 'active',
+          isStandalone: false,
+          createdBy: 'host-1',
+          participants: [{ userId: 'host-1' }],
+        },
+        isMember: false,
+      })
+
+      const result = await controller.joinByToken(makeReq(), 'tok-1')
+
+      expect(result).toEqual(expect.objectContaining({ requiresApproval: true }))
+    })
   })
 })

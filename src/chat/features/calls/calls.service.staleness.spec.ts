@@ -363,4 +363,100 @@ describe('CallsService — call staleness and state-machine integrity', () => {
       expect(calls.updateOne).not.toHaveBeenCalled()
     })
   })
+
+  // Regression for the "add a participant mid-call → false missed call" bug:
+  // the ringing-timeout reaper used to key off the call's original
+  // startedAt alone, with no idea a brand-new invitee had just been added
+  // via call.invite — so a contact invited at e.g. second 85 of an
+  // already-stale-looking ring could be swept into 'missed' moments later,
+  // seconds after being invited and with zero fair ring time.
+  describe('cleanupStaleCalls — lastInviteAt resets the ringing-timeout clock', () => {
+    it('does NOT miss a call whose lastInviteAt is recent, even if startedAt is well past 90s', async () => {
+      const recentlyReInvited = {
+        conversationId: 'conv-11',
+        callId: 'call-11',
+        status: 'ringing',
+        startedAt: new Date(Date.now() - 300_000), // 5 min old originally
+        lastInviteAt: new Date(Date.now() - 5_000), // but invited someone 5s ago
+        participants: [{ userId: 'new-invitee', status: 'invited' }],
+      }
+      const find = jest.fn()
+        .mockReturnValueOnce({ lean: () => Promise.resolve([recentlyReInvited]) }) // stale ringing candidates
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+      const calls = { find, updateOne: jest.fn() }
+      const service = new CallsService(calls as any)
+
+      await service.cleanupStaleCalls()
+
+      expect(calls.updateOne).not.toHaveBeenCalled()
+    })
+
+    it('still misses a call whose lastInviteAt is itself past the 90s window', async () => {
+      const staleEvenAfterReinvite = {
+        conversationId: 'conv-12',
+        callId: 'call-12',
+        status: 'ringing',
+        startedAt: new Date(Date.now() - 300_000),
+        lastInviteAt: new Date(Date.now() - 100_000), // the re-invite itself is 100s old
+        createdBy: 'caller-1',
+        participants: [{ userId: 'invitee-1', status: 'invited' }],
+      }
+      const find = jest.fn()
+        .mockReturnValueOnce({ lean: () => Promise.resolve([staleEvenAfterReinvite]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+      const calls = { find, updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }) }
+      const service = new CallsService(calls as any)
+
+      await service.cleanupStaleCalls()
+
+      expect(calls.updateOne).toHaveBeenCalledWith(
+        { conversationId: 'conv-12', callId: 'call-12', status: { $ne: 'missed' } },
+        expect.objectContaining({ $set: expect.objectContaining({ status: 'missed' }) }),
+      )
+    })
+
+    it('falls back to startedAt when lastInviteAt was never set (normal, never-re-invited call)', async () => {
+      const normalStale = {
+        conversationId: 'conv-13',
+        callId: 'call-13',
+        status: 'ringing',
+        startedAt: new Date(Date.now() - 120_000),
+        lastInviteAt: null,
+        createdBy: 'caller-1',
+        participants: [{ userId: 'invitee-1', status: 'invited' }],
+      }
+      const find = jest.fn()
+        .mockReturnValueOnce({ lean: () => Promise.resolve([normalStale]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+        .mockReturnValueOnce({ lean: () => Promise.resolve([]) })
+      const calls = { find, updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }) }
+      const service = new CallsService(calls as any)
+
+      await service.cleanupStaleCalls()
+
+      expect(calls.updateOne).toHaveBeenCalledWith(
+        { conversationId: 'conv-13', callId: 'call-13', status: { $ne: 'missed' } },
+        expect.objectContaining({ $set: expect.objectContaining({ status: 'missed' }) }),
+      )
+    })
+  })
+
+  describe('touchLastInviteAt', () => {
+    it('sets lastInviteAt to now for the given call', async () => {
+      const calls = { updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }) }
+      const service = new CallsService(calls as any)
+
+      await service.touchLastInviteAt('conv-14', 'call-14')
+
+      expect(calls.updateOne).toHaveBeenCalledWith(
+        { conversationId: 'conv-14', callId: 'call-14' },
+        { $set: { lastInviteAt: expect.any(Date) } },
+      )
+    })
+  })
 })

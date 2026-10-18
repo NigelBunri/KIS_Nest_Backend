@@ -51,6 +51,7 @@ describe('CallsService — duplicate push notification protection', () => {
       callId: 'call-3',
       createdBy: 'caller-1',
       callType: 'voice',
+      startedAt: new Date(Date.now() - 100_000),
       participants: [{ userId: 'invitee-1', status: 'invited' }],
     }
 

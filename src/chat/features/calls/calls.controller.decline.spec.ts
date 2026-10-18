@@ -13,7 +13,7 @@ function makeReq() {
   return { headers: { authorization: 'Bearer jwt-token', 'x-device-id': 'device-1' } } as any
 }
 
-function makeController(overrides: { principal?: any; callExists?: boolean } = {}) {
+function makeController(overrides: { principal?: any; callExists?: boolean; endedForEveryone?: boolean } = {}) {
   const principal = overrides.principal ?? { userId: 'recipient-1', username: 'Recipient' }
   const authService = { introspect: jest.fn().mockResolvedValue(principal) }
   const djangoConversationClient = { assertMember: jest.fn().mockResolvedValue(undefined) }
@@ -22,7 +22,9 @@ function makeController(overrides: { principal?: any; callExists?: boolean } = {
       ? jest.fn().mockRejectedValue(new Error('not found'))
       : jest.fn().mockResolvedValue({ callId: 'call-1', createdBy: 'caller-1' }),
     setParticipantStatus: jest.fn().mockResolvedValue(undefined),
-    endIfNoActiveParticipants: jest.fn().mockResolvedValue(undefined),
+    endIfNoActiveParticipants: jest.fn().mockResolvedValue(overrides.endedForEveryone ?? true),
+    hasActiveInviteToken: jest.fn().mockResolvedValue(false),
+    isInvitedParticipant: jest.fn().mockResolvedValue(false),
   }
   const rateLimit = { assert: jest.fn() }
   const emit = jest.fn()
@@ -51,8 +53,8 @@ describe('CallsController.decline', () => {
     expect(callsService.endIfNoActiveParticipants).toHaveBeenCalledWith('conv-1', 'call-1')
   })
 
-  it('broadcasts call.end to the conversation room with reason "rejected", matching what the caller\'s existing socket listener expects', async () => {
-    const { controller, to, emit } = makeController()
+  it('broadcasts call.end to the conversation room with reason "rejected" when the decline ends the call for everyone', async () => {
+    const { controller, to, emit } = makeController({ endedForEveryone: true })
 
     await controller.decline(makeReq(), 'call-1', { conversation_id: 'conv-1' })
 
@@ -61,6 +63,22 @@ describe('CallsController.decline', () => {
       'call.end',
       expect.objectContaining({ callId: 'call-1', conversationId: 'conv-1', fromUserId: 'recipient-1', reason: 'rejected' }),
     )
+  })
+
+  it('does NOT broadcast call.end when other participants are still active — regression test for the false-missed-call bug', async () => {
+    // Previously this endpoint broadcast CALL_END room-wide unconditionally,
+    // even when endIfNoActiveParticipants found other participants still
+    // invited/connecting/joined. The mobile client's call.end listener
+    // flips its local call state to ended/missed for ANY call.end matching
+    // its callId, with no per-recipient scoping — so one declining
+    // group-call invitee's notification-tray Decline tap was ending the
+    // call on every other still-connected participant's screen.
+    const { controller, to, emit } = makeController({ endedForEveryone: false })
+
+    await controller.decline(makeReq(), 'call-1', { conversation_id: 'conv-1' })
+
+    expect(to).not.toHaveBeenCalled()
+    expect(emit).not.toHaveBeenCalled()
   })
 
   it('is a safe no-op for a call that no longer exists (already ended/expired) — never throws', async () => {

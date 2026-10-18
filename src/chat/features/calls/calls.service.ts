@@ -32,6 +32,8 @@ type StandaloneCallArgs = {
   scheduledFor?: Date | null
   scheduledDurationMinutes?: number | null
   inviteeUserIds?: string[]
+  /** Broadcast only: whether the creator appears in their own panelist grid. Default true. */
+  hostIsPanelist?: boolean
 }
 
 type NotificationsServiceRef = {
@@ -349,6 +351,12 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
       joinedAt: null,
       leftAt: null,
       reason: null,
+      // This path (a call started directly inside an existing
+      // conversation, not the standalone "New call" flow with its own
+      // host_is_panelist toggle) has no opt-out, so the creator always
+      // defaults to visible — matches every other call type's existing
+      // behavior unchanged.
+      isPanelist: true,
     })
 
     if (args.inviteeUserIds?.length) {
@@ -362,6 +370,9 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
           joinedAt: null,
           leftAt: null,
           reason: null,
+          // Not chosen via the panelist picker (this path has none) — a
+          // generic invitee here, not a pre-selected panelist.
+          isPanelist: false,
         })
       }
     }
@@ -444,6 +455,14 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     userId: string,
     status: CallParticipantStatus,
     reason?: string,
+    // Only meaningful the FIRST time this user appears on the call (the
+    // $push branch below) — an existing row's isPanelist is never
+    // touched by a later status transition, same as role isn't. Defaults
+    // to false (a self-serve joiner, e.g. via invite link, is never
+    // automatically a panelist) - callers that know this user was
+    // explicitly chosen as a panelist (createStandaloneCall's invitee
+    // loop, call.invite's mid-broadcast add) pass true.
+    isPanelist = false,
   ): Promise<CallSession | null> {
     const now = new Date()
 
@@ -465,6 +484,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
               joinedAt: status === 'joined' ? now : null,
               leftAt: status === 'left' || status === 'rejected' || status === 'busy' ? now : null,
               reason: reason ?? null,
+              isPanelist,
             },
           },
         },
@@ -621,6 +641,24 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     )
   }
 
+  /**
+   * Broadcast-only: move a participant between the panelist grid and the
+   * participant strip, independent of their `role` (moderation/speaking
+   * rights). See CallParticipant.isPanelist's own doc comment for why
+   * this is a separate axis from setParticipantRole above.
+   */
+  async setParticipantPanelist(
+    conversationId: string,
+    callId: string,
+    userId: string,
+    isPanelist: boolean,
+  ): Promise<void> {
+    await this.calls.updateOne(
+      { conversationId, callId, 'participants.userId': userId },
+      { $set: { 'participants.$.isPanelist': isPanelist } },
+    )
+  }
+
   async bumpViewerCount(conversationId: string, callId: string, delta: 1 | -1): Promise<number> {
     const result = await this.calls.findOneAndUpdate(
       { conversationId, callId, isActiveInConversation: true },
@@ -640,27 +678,39 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     if (call.status === 'ended' || call.status === 'missed') throw new Error('CALL_ALREADY_ENDED')
   }
 
-  async endIfNoActiveParticipants(conversationId: string, callId: string): Promise<void> {
+  /**
+   * Returns true when the call is terminal (ended/missed) after this call —
+   * either it already was, or this call just made it so. Returns false when
+   * other participants are still invited/connecting/joined, meaning the call
+   * stays alive for them. Callers (the call.end socket handler and the REST
+   * decline endpoint) MUST check this before broadcasting a room-wide
+   * CALL_END — broadcasting it while this returns false would tell every
+   * other participant's device the call ended, when it didn't (see the
+   * call.end handler's own comment on this for the full incident history).
+   */
+  async endIfNoActiveParticipants(conversationId: string, callId: string): Promise<boolean> {
     const call = await this.getCall(conversationId, callId)
-    if (!call || call.status === 'ended' || call.status === 'missed') return
+    if (!call) return true
+    if (call.status === 'ended' || call.status === 'missed') return true
 
     const anyStillIn =
       call.participants.some((p) => p.status === 'joined' || p.status === 'connecting' || p.status === 'invited')
 
-    if (!anyStillIn) {
-      // Same classification rule as endCall(): nobody ever joined this
-      // call → it was missed, not merely "ended", even though every
-      // invitee got there by declining/busy rather than an explicit
-      // cancel. No one is left in invited/connecting state at this point
-      // (that's this branch's own precondition), so there's no remaining
-      // invitee to push a missed-call notification to here.
-      const anyJoined = call.participants.some((p) => p.status === 'joined')
-      const terminalStatus: CallStatus = !anyJoined && call.status === 'ringing' ? 'missed' : 'ended'
-      await this.calls.updateOne(
-        { conversationId, callId, status: call.status },
-        { $set: { status: terminalStatus, endedAt: new Date(), isActiveInConversation: false } },
-      )
-    }
+    if (anyStillIn) return false
+
+    // Same classification rule as endCall(): nobody ever joined this
+    // call → it was missed, not merely "ended", even though every
+    // invitee got there by declining/busy rather than an explicit
+    // cancel. No one is left in invited/connecting state at this point
+    // (that's this branch's own precondition), so there's no remaining
+    // invitee to push a missed-call notification to here.
+    const anyJoined = call.participants.some((p) => p.status === 'joined')
+    const terminalStatus: CallStatus = !anyJoined && call.status === 'ringing' ? 'missed' : 'ended'
+    await this.calls.updateOne(
+      { conversationId, callId, status: call.status },
+      { $set: { status: terminalStatus, endedAt: new Date(), isActiveInConversation: false } },
+    )
+    return true
   }
 
   /** Return the active call (if any) for a specific conversation. */
@@ -749,6 +799,13 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const callType = args.callType ?? 'voice'
     const legacyMedia = callType.startsWith('video') ? 'video' : 'voice'
 
+    // Broadcast-only: whether the creator wants to appear in their own
+    // panelist grid, or run the broadcast off-panel (full host control
+    // either way — assertCallHost gates on createdBy, never role or
+    // isPanelist). Meaningless for non-broadcast types; defaults true so
+    // every other call type's host keeps today's behavior unchanged.
+    const hostIsPanelist = callType === 'broadcast' ? args.hostIsPanelist !== false : true
+
     const participants: CallParticipant[] = [
       {
         userId: args.createdBy,
@@ -758,6 +815,7 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
         joinedAt: null,
         leftAt: null,
         reason: null,
+        isPanelist: hostIsPanelist,
       },
     ]
 
@@ -772,6 +830,10 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
           joinedAt: null,
           leftAt: null,
           reason: null,
+          // Chosen via the panelist picker at creation time (inviteeUserIds
+          // is only even required for callType 'broadcast') — a panelist
+          // from the moment they join, not a generic invited participant.
+          isPanelist: callType === 'broadcast',
         })
       }
     }
@@ -1003,6 +1065,16 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     await this.calls.updateOne({ conversationId, callId }, { $set: update })
   }
 
+  /**
+   * Bumps lastInviteAt so cleanupStaleCalls' ringing-timeout reaper (see its
+   * own comment) gives a newly-added invitee a fresh 90s ring window instead
+   * of inheriting however little time is left on the call's original
+   * startedAt-based clock. Called from the call.invite socket handler.
+   */
+  async touchLastInviteAt(conversationId: string, callId: string): Promise<void> {
+    await this.calls.updateOne({ conversationId, callId }, { $set: { lastInviteAt: new Date() } })
+  }
+
   /** Return participants who are waiting to join a pending scheduled call. */
   async getWaitingParticipants(conversationId: string, callId: string): Promise<string[]> {
     const call = await this.calls.findOne({ conversationId, callId }, { participants: 1 }).lean()
@@ -1019,9 +1091,17 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     const durationCutoff = new Date(now.getTime() - 86_400_000) // active > 24 h → force-ended
 
     // ── 1. Unanswered ringing calls → missed ─────────────────────────────────
-    const staleRinging = await this.calls
-      .find({ status: { $in: ['ringing'] }, startedAt: { $lt: ringingCutoff }, isActiveInConversation: true })
+    // Fetched without a startedAt filter and checked in JS against
+    // lastInviteAt (when set) instead - a call.invite partway through the
+    // original ring window resets this call's own 90s clock, so a contact
+    // added at second 85 of a stale-looking call still gets a fair ring
+    // instead of being swept into 'missed' moments after being invited.
+    const staleRingingCandidates = await this.calls
+      .find({ status: { $in: ['ringing'] }, isActiveInConversation: true })
       .lean()
+    const staleRinging = staleRingingCandidates.filter(
+      (call) => (call.lastInviteAt ?? call.startedAt) < ringingCutoff,
+    )
     for (const call of staleRinging) {
       // Guard against duplicate missed-call pushes if this tick overlaps a
       // still-running previous tick (cleanupStaleCalls has no run-time cap

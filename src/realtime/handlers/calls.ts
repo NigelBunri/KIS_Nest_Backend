@@ -63,6 +63,13 @@ export interface CallsDeps {
       callId: string
       callType?: string
     }): Promise<any>
+    notifyAdmissionRequest?(input: {
+      toUserId: string
+      requesterUserId: string
+      requesterDisplayName?: string
+      conversationId: string
+      callId: string
+    }): Promise<any>
   }
   callsService?: {
     createCallOrThrowIfActiveInConversation?(args: {
@@ -86,12 +93,19 @@ export interface CallsDeps {
       userId: string,
       status: 'invited' | 'connecting' | 'joined' | 'left' | 'rejected' | 'busy',
       reason?: string,
+      isPanelist?: boolean,
     ): Promise<any>
     setParticipantRole?(
       conversationId: string,
       callId: string,
       userId: string,
       role: 'host' | 'co-host' | 'speaker' | 'audience',
+    ): Promise<void>
+    setParticipantPanelist?(
+      conversationId: string,
+      callId: string,
+      userId: string,
+      isPanelist: boolean,
     ): Promise<void>
     appendSignal?(
       conversationId: string,
@@ -110,7 +124,8 @@ export interface CallsDeps {
       endedByUserId: string,
       reason?: string,
     ): Promise<any>
-    endIfNoActiveParticipants?(conversationId: string, callId: string): Promise<void>
+    endIfNoActiveParticipants?(conversationId: string, callId: string): Promise<boolean>
+    touchLastInviteAt?(conversationId: string, callId: string): Promise<void>
     bumpViewerCount?(conversationId: string, callId: string, delta: 1 | -1): Promise<number>
     upsertState?(args: { conversationId: string; state: Record<string, unknown> }): Promise<void>
     clearState?(args: { conversationId: string }): Promise<void>
@@ -347,6 +362,11 @@ function createCallHandler(
         fromPhone: principal.phone,
       }
 
+      // Only meaningful for CALL_END — true unless the handler below
+      // determines a decline/busy left other participants still active,
+      // in which case the room-wide CALL_END broadcast is skipped.
+      let callEndedForEveryone = true
+
       // Collect invitee IDs for CALL_OFFER — needed for routing below
       let offerInviteeIds: string[] =
         event === EVT.CALL_OFFER && Array.isArray(payload?.inviteeUserIds)
@@ -498,7 +518,7 @@ function createCallHandler(
           if (deps.callsService.markActive && !activatedCall) {
             return safeAck(ack, err('This call is no longer active', 'CALL_ENDED'))
           }
-          await deps.callsService.setParticipantStatus?.(
+          const joinedCall = await deps.callsService.setParticipantStatus?.(
             conversationId,
             callId,
             principal.userId,
@@ -511,6 +531,17 @@ function createCallHandler(
             fromUserId: principal.userId,
             payloadType: 'answer',
           })
+          // role/isPanelist come from whatever row this answerer already
+          // had (set at invite time by createStandaloneCall/call.invite) —
+          // setParticipantStatus's 'joined' transition never touches
+          // either field, so this reads back the row's existing values,
+          // not a fresh default. Without forwarding these here, every
+          // OTHER client's CALL_PARTICIPANT_JOINED listener would place a
+          // pre-invited panelist straight into the generic participant
+          // strip the instant they actually joined.
+          const joinedRow = (joinedCall?.participants ?? []).find(
+            (row: any) => String(row.userId) === principal.userId,
+          )
           // Notify all conv participants that this user joined
           safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_PARTICIPANT_JOINED, {
             callId,
@@ -522,6 +553,8 @@ function createCallHandler(
             // as createCallHandler's enrichedPayload.displayName above.
             displayName: principal.username,
             joinedAt: enrichedPayload.acceptedAt,
+            role: joinedRow?.role ?? null,
+            isPanelist: !!joinedRow?.isPanelist,
           })
           // For broadcast calls: audience members bump the viewer count
           if (
@@ -562,9 +595,16 @@ function createCallHandler(
               reason === 'busy' ? 'busy' : 'rejected',
               reason,
             )
-            await deps.callsService.endIfNoActiveParticipants?.(conversationId, callId)
+            // One invitee declining/busy must NOT end the call for everyone
+            // else still invited/connecting/joined — endIfNoActiveParticipants
+            // only flips the call to a terminal status when NO ONE is left.
+            // callEndedForEveryone below gates the room-wide CALL_END
+            // broadcast on its actual result instead of firing unconditionally
+            // (see that broadcast's own comment for the bug this closes).
+            callEndedForEveryone = (await deps.callsService.endIfNoActiveParticipants?.(conversationId, callId)) ?? true
           } else {
             await deps.callsService.endCall?.(conversationId, callId, principal.userId, reason)
+            callEndedForEveryone = true
           }
           await deps.callsService.appendSignal?.(conversationId, callId, {
             kind: 'hangup',
@@ -610,7 +650,23 @@ function createCallHandler(
       // below via their user rooms. For all other events (call.answer, call.end,
       // call.ice, SDP …) — and for call.offer with no invitee list (open group /
       // broadcast) — the conv-room broadcast is correct.
-      const skipConvBroadcast = event === EVT.CALL_OFFER && offerInviteeIds.length > 0
+      //
+      // call.end with reason rejected/busy that did NOT end the call for
+      // everyone (callEndedForEveryone === false, set above): skip this
+      // broadcast too. The mobile client's call.end listener flips its
+      // local call state to ended/missed for ANY call.end matching its
+      // callId, with no awareness that the event was actually scoped to one
+      // declining invitee — broadcasting it room-wide here was ending the
+      // call on every other participant's screen even though the backend's
+      // own call.status correctly stayed 'active'/'ringing'. The declining
+      // user's own screen doesn't need this broadcast either: the mobile
+      // endCall()/rejectCall() already sets their local state optimistically
+      // before the server round-trip. CALL_PARTICIPANT_LEFT below still
+      // informs everyone that this one participant left/declined, which the
+      // mobile client already treats as non-destructive to call state.
+      const skipConvBroadcast =
+        (event === EVT.CALL_OFFER && offerInviteeIds.length > 0) ||
+        (event === EVT.CALL_END && !callEndedForEveryone)
       if (!skipConvBroadcast) {
         safeEmit(server, rooms.convRoom(conversationId), event, enrichedPayload)
       }
@@ -836,8 +892,11 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
         conversationId, callId, principal.userId,
       )
       if (wasPendingRemoval) {
-        await deps.callsService?.setParticipantStatus?.(
+        const rejoinedCall = await deps.callsService?.setParticipantStatus?.(
           conversationId, callId, principal.userId, 'joined',
+        )
+        const rejoinedRow = (rejoinedCall?.participants ?? []).find(
+          (row: any) => String(row.userId) === principal.userId,
         )
         safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_PARTICIPANT_JOINED, {
           callId,
@@ -846,6 +905,8 @@ function registerWebRTCHandlers(server: Server, socket: Socket, deps: CallsDeps)
           displayName: principal.username,
           rejoined: true,
           joinedAt: new Date().toISOString(),
+          role: rejoinedRow?.role ?? null,
+          isPanelist: !!rejoinedRow?.isPanelist,
         })
       }
 
@@ -1093,6 +1154,43 @@ function registerHostHandlers(server: Server, socket: Socket, deps: CallsDeps) {
       safeAck(ack, err(error?.message ?? 'Remove failed', 'ERROR'))
     }
   })
+
+  // call.panelist.set — host moves a participant between the broadcast's
+  // panelist grid and participant strip, independent of their role (see
+  // CallParticipant.isPanelist's own doc comment for why this is a
+  // separate axis from call.promote/CALL_ROLE_CHANGED above).
+  socket.on(EVT.CALL_PANELIST_SET, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+    const targetUserId = typeof p.targetUserId === 'string' ? p.targetUserId : null
+    const isPanelist = typeof p.isPanelist === 'boolean' ? p.isPanelist : null
+
+    if (!conversationId || !callId || !targetUserId || isPanelist === null) {
+      return safeAck(ack, err('conversationId, callId, targetUserId, isPanelist required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:host', 60)
+      await assertCallHost(deps, conversationId, callId, principal)
+
+      await deps.callsService?.setParticipantPanelist?.(conversationId, callId, targetUserId, isPanelist)
+
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_PANELIST_CHANGED, {
+        conversationId,
+        callId,
+        userId: targetUserId,
+        isPanelist,
+        changedBy: principal.userId,
+        changedAt: new Date().toISOString(),
+      })
+      safeAck(ack, ok({ delivered: true }))
+    } catch (error: any) {
+      logger.error(`[calls] call.panelist.set failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Panelist update failed', 'ERROR'))
+    }
+  })
 }
 
 // ─── Screen sharing ───────────────────────────────────────────────────────────
@@ -1232,7 +1330,12 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
     const p = payload as Record<string, unknown> ?? {}
     const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
     const callId = typeof p.callId === 'string' ? p.callId : null
-    const displayName = typeof p.displayName === 'string' ? p.displayName : principal.userId
+    // Authoritatively from the token, same as every other identity field in
+    // this file (enrichedPayload.displayName/fromPhone, etc.) — never a
+    // client-supplied string. The host's admission-request list is exactly
+    // the kind of surface a spoofed name ("Pastor John (Verified)") could
+    // be used to social-engineer, so this must not trust payload.displayName.
+    const displayName = principal.username
 
     if (!conversationId || !callId) {
       return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
@@ -1272,8 +1375,27 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
         callId,
         userId: principal.userId,
         displayName,
+        phone: principal.phone,
         knockedAt: new Date().toISOString(),
       })
+      // The broadcast above only reaches sockets already subscribed to this
+      // conv room - a host who's backgrounded or doesn't have the call
+      // screen mounted would otherwise never learn anyone is waiting to be
+      // admitted. Push is the same best-effort fallback every other
+      // call-adjacent notification already gets; a failure here must not
+      // fail the knock itself.
+      if (deps.notificationsService) {
+        const hostUserId = await deps.callsService?.getCallCreator?.(conversationId, callId).catch(() => null)
+        if (hostUserId && hostUserId !== principal.userId) {
+          deps.notificationsService.notifyAdmissionRequest?.({
+            toUserId: hostUserId,
+            requesterUserId: principal.userId,
+            requesterDisplayName: displayName,
+            conversationId,
+            callId,
+          }).catch((e: any) => logger.warn(`[calls] knock push notify failed userId=${hostUserId}`, e?.message))
+        }
+      }
       safeAck(ack, ok({ delivered: true }))
     } catch (error: any) {
       logger.error(`[calls] call.knock failed userId=${principal?.userId}`, error?.message)
@@ -1352,6 +1474,41 @@ function registerKnockHandlers(server: Server, socket: Socket, deps: CallsDeps) 
     } catch (error: any) {
       logger.error(`[calls] call.knock.deny failed userId=${principal?.userId}`, error?.message)
       safeAck(ack, err(error?.message ?? 'Deny failed', 'ERROR'))
+    }
+  })
+
+  // call.knock.cancel — the requester withdraws their own pending knock
+  // (closed the waiting screen, backgrounded the app, gave up waiting).
+  // No host/admin authorization needed - a user can always cancel their own
+  // request. Without this, a withdrawn request lingered in the host's
+  // pending list and badge count until it eventually expired/the call ended.
+  socket.on(EVT.CALL_KNOCK_CANCEL, async (payload: unknown, ack?: (a: Ack<any>) => void) => {
+    const principal = getPrincipal(socket)
+    const p = payload as Record<string, unknown> ?? {}
+    const conversationId = typeof p.conversationId === 'string' ? p.conversationId : null
+    const callId = typeof p.callId === 'string' ? p.callId : null
+
+    if (!conversationId || !callId) {
+      return safeAck(ack, err('conversationId and callId required', 'BAD_REQUEST'))
+    }
+
+    try {
+      await deps.rateLimitService?.assert(principal, 'call:knock', 10)
+      await deps.callsService?.removeKnocker?.(conversationId, callId, principal.userId)
+
+      // Broadcast to the whole conv room, same scope CALL_KNOCK_REQUEST was
+      // delivered on, so every device tracking a pending-requests list
+      // (not just the host's) removes this entry.
+      safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_KNOCK_CANCELLED, {
+        conversationId,
+        callId,
+        userId: principal.userId,
+        cancelledAt: new Date().toISOString(),
+      })
+      safeAck(ack, ok({ delivered: true }))
+    } catch (error: any) {
+      logger.error(`[calls] call.knock.cancel failed userId=${principal?.userId}`, error?.message)
+      safeAck(ack, err(error?.message ?? 'Cancel failed', 'ERROR'))
     }
   })
 
@@ -1614,7 +1771,18 @@ function registerScheduledCallHandlers(server: Server, socket: Socket, deps: Cal
         }
       }
 
-      safeAck(ack, ok({ callId, conversationId, callType: call.callType, title: call.title, inviteeIds }))
+      // Lets the host's own client construct their LOCAL participant row
+      // with the same isPanelist value they chose at creation time
+      // (host_is_panelist) instead of defaulting to true regardless — the
+      // call.participant.joined path handles every OTHER client's view of
+      // the host correctly via the participant row itself, but the host's
+      // own session is built client-side from this ack, not from a
+      // participant-joined event about themselves.
+      const hostRow = (call.participants ?? []).find((row: any) => String(row.userId) === principal.userId)
+      safeAck(ack, ok({
+        callId, conversationId, callType: call.callType, title: call.title, inviteeIds,
+        hostIsPanelist: !!hostRow?.isPanelist,
+      }))
     } catch (error: any) {
       logger.error(`[calls] call.scheduled.start failed userId=${principal?.userId}`, error?.message)
       safeAck(ack, err(error?.message ?? 'Failed to start scheduled call', 'ERROR'))
@@ -1975,10 +2143,45 @@ function registerInviteHandler(server: Server, socket: Socket, deps: CallsDeps) 
       if (!callData) {
         return safeAck(ack, err('Call not found', 'NOT_FOUND'))
       }
+      if (callData.status === 'ended' || callData.status === 'missed') {
+        return safeAck(ack, err('This call has ended', 'CALL_ENDED'))
+      }
 
-      // Record each invitee and push call.offer to their user room
-      for (const uid of inviteeUserIds) {
-        await deps.callsService?.setParticipantStatus?.(conversationId, callId, uid, 'invited')
+      // Repeated taps on "add contact" (or a client retry) must not re-ring
+      // someone already mid-invite, and must never reset an already-joined
+      // participant's status back to 'invited' - setParticipantStatus has no
+      // transition guard of its own, so doing this unconditionally for every
+      // uid in the payload (as before) could silently demote a participant
+      // who already joined back to a bare "invited" row.
+      const existingStatusByUserId = new Map<string, string>(
+        (callData.participants ?? [])
+          .filter((part: any) => part?.userId)
+          .map((part: any) => [String(part.userId), String(part.status)]),
+      )
+      const freshInviteeUserIds = inviteeUserIds.filter((uid) => {
+        const status = existingStatusByUserId.get(uid)
+        return status !== 'invited' && status !== 'connecting' && status !== 'joined'
+      })
+
+      if (freshInviteeUserIds.length === 0) {
+        return safeAck(ack, ok({ delivered: true, invitedCount: 0 }))
+      }
+
+      // A new invite mid-ring resets this call's own stale-ringing-timeout
+      // clock (see cleanupStaleCalls/lastInviteAt in calls.service.ts) - so a
+      // contact added late in an otherwise-stale ring window gets a fair
+      // chance to answer instead of the whole call being auto-missed
+      // seconds after they were invited.
+      await deps.callsService?.touchLastInviteAt?.(conversationId, callId)
+
+      // Record each fresh invitee and push call.offer to their user room.
+      // Mid-broadcast, "Add" is already understood (both in the mobile UI
+      // and the pre-call panelist picker) as adding a PANELIST, not a
+      // bare audience member — see CallParticipant.isPanelist's own doc
+      // comment.
+      const inviteeIsPanelist = callData.callType === 'broadcast'
+      for (const uid of freshInviteeUserIds) {
+        await deps.callsService?.setParticipantStatus?.(conversationId, callId, uid, 'invited', undefined, inviteeIsPanelist)
         const invitePayload = {
           conversationId,
           callId,
@@ -2004,7 +2207,7 @@ function registerInviteHandler(server: Server, socket: Socket, deps: CallsDeps) 
         }
       }
 
-      safeAck(ack, ok({ delivered: true, invitedCount: inviteeUserIds.length }))
+      safeAck(ack, ok({ delivered: true, invitedCount: freshInviteeUserIds.length }))
     } catch (error: any) {
       logger.error(`[calls] call.invite failed userId=${principal?.userId}`, error?.message)
       safeAck(ack, err(error?.message ?? 'Invite failed', 'ERROR'))

@@ -199,6 +199,25 @@ describe('call-control host-only handlers reject a nonexistent/fabricated callId
     expect(emitsByRoom.size).toBe(0)
   })
 
+  it('call.panelist.set: FORBIDDEN when getCallCreator resolves null', async () => {
+    const { socket, handlers } = makeSocket()
+    const { server, emitsByRoom } = makeServer()
+    const deps = makeDepsWithNoSuchCall({
+      callsService: { getCallCreator: jest.fn().mockResolvedValue(null), setParticipantPanelist: jest.fn() },
+    } as Partial<CallsDeps>)
+    registerCallHandlers(server as any, socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get('call.panelist.set')!(
+      { conversationId: 'victim-conv', callId: 'fabricated-call-id', targetUserId: 'victim', isPanelist: true },
+      ack,
+    )
+
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false }))
+    expect((deps.callsService as any).setParticipantPanelist).not.toHaveBeenCalled()
+    expect(emitsByRoom.size).toBe(0)
+  })
+
   it('call.knock: rejects a non-member from broadcasting into an arbitrary conversation (previously had NO membership check at all)', async () => {
     const { socket, handlers } = makeSocket()
     const { server, emitsByRoom } = makeServer()
@@ -260,6 +279,29 @@ describe('call-control host-only handlers still allow the real host through', ()
 
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
     expect((deps.callsService as any).setRecordingState).toHaveBeenCalledWith('real-conv', 'real-call', 'recording')
+    expect(emitsByRoom.get(require('../../chat/chat.types').rooms.convRoom('real-conv'))).toHaveBeenCalled()
+  })
+
+  it('call.panelist.set: succeeds for the real host', async () => {
+    const { socket, handlers } = makeSocket('real-host')
+    const { server, emitsByRoom } = makeServer()
+    const deps = {
+      djangoConversationClient: { assertMember: jest.fn() },
+      callsService: {
+        getCallCreator: jest.fn().mockResolvedValue('real-host'),
+        setParticipantPanelist: jest.fn(),
+      },
+    } as unknown as CallsDeps
+    registerCallHandlers(server as any, socket, deps)
+    const ack = jest.fn()
+
+    await handlers.get('call.panelist.set')!(
+      { conversationId: 'real-conv', callId: 'real-call', targetUserId: 'some-user', isPanelist: true },
+      ack,
+    )
+
+    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+    expect((deps.callsService as any).setParticipantPanelist).toHaveBeenCalledWith('real-conv', 'real-call', 'some-user', true)
     expect(emitsByRoom.get(require('../../chat/chat.types').rooms.convRoom('real-conv'))).toHaveBeenCalled()
   })
 

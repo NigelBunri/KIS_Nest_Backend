@@ -136,4 +136,24 @@ describe('CallsController.createStandalone', () => {
     const result = await controller.createStandalone(makeReq(), { call_id: 'call-1' })
     expect(result.scheduledDurationMinutes).toBe(45)
   })
+
+  it('passes host_is_panelist through to createStandaloneCall as hostIsPanelist', async () => {
+    const { controller, createStandaloneCall } = makeController()
+    await controller.createStandalone(makeReq(), {
+      call_id: 'call-1', call_type: 'broadcast', invitee_user_ids: ['panelist-0'], host_is_panelist: false,
+    })
+    expect(createStandaloneCall).toHaveBeenCalledWith(
+      expect.objectContaining({ hostIsPanelist: false }),
+    )
+  })
+
+  it('leaves hostIsPanelist undefined (service defaults it) when host_is_panelist is not sent', async () => {
+    const { controller, createStandaloneCall } = makeController()
+    await controller.createStandalone(makeReq(), {
+      call_id: 'call-1', call_type: 'broadcast', invitee_user_ids: ['panelist-0'],
+    })
+    expect(createStandaloneCall).toHaveBeenCalledWith(
+      expect.objectContaining({ hostIsPanelist: undefined }),
+    )
+  })
 })

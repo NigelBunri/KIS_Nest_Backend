@@ -38,6 +38,17 @@ export class CallParticipant {
 
   @Prop({ type: String, default: null })
   reason!: string | null;
+
+  // Broadcast-only UI placement: is this person shown in the panelist
+  // grid vs the participant strip? Deliberately ORTHOGONAL to `role` —
+  // role still governs mic/camera + moderation rights everywhere else in
+  // this codebase, unchanged. This exists purely so a host can run a
+  // broadcast without appearing on the panel themselves (role stays
+  // 'host', full control, isPanelist: false) and so the host can move
+  // anyone between the two groups without also having to touch their
+  // speaking rights. Meaningless for non-broadcast call types.
+  @Prop({ type: Boolean, default: false })
+  isPanelist!: boolean;
 }
 
 @Schema({ _id: false })
@@ -94,6 +105,16 @@ export class CallSession {
 
   @Prop({ type: Date, default: null })
   endedAt!: Date | null;
+
+  // Bumped whenever a new invitee is added to an already-ringing call
+  // (call.invite). cleanupStaleCalls' 90s ringing-timeout reaper checks this
+  // instead of just `startedAt` - otherwise a contact invited late in an
+  // unanswered call's ring window could be auto-missed seconds after being
+  // invited, since the reaper's cutoff was computed purely from the call's
+  // original start time with no awareness that someone new just joined the
+  // ring. Left null for calls nobody has ever been added to post-creation.
+  @Prop({ type: Date, default: null })
+  lastInviteAt!: Date | null;
 
   // Legacy 2-value field kept for backwards compat
   @Prop({ type: String, default: 'voice' })
