@@ -191,4 +191,47 @@ describe('call.answer participant cap for a 1:1 call escalated via call.invite',
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'CALL_FULL' }))
     expect((deps.callsService as any).setParticipantStatus).not.toHaveBeenCalled()
   })
+
+  it('lets a 3rd person who resolved an invite LINK (not call.invite) join a voice call that already has its 2 original parties joined', async () => {
+    // The actual reported bug: "adding a participant works, joining via
+    // link doesn't". A link joiner has no pre-existing participant row —
+    // unlike a call.invite invitee (whose 'invited' row is pushed before
+    // they ever answer), a link joiner's first row is created by THIS
+    // call.answer. So participants.length is still only 2 at the moment
+    // this check runs, and checking length alone (the previous fix) never
+    // caught this case. isInviteLinkEligible (hasActiveInviteToken, set
+    // earlier in this same handler) must be enough on its own.
+    const { socket, handlers } = makeSocket('user-3')
+    const { server } = makeServer()
+    const ack = jest.fn()
+    const deps = makeDeps({
+      djangoConversationClient: {
+        assertMember: jest.fn().mockRejectedValue(new Error('Not a conversation member')),
+        checkBlockedAmong: jest.fn().mockResolvedValue([]),
+      },
+      callsService: {
+        ensureCallExistsOrThrow: jest.fn().mockResolvedValue({
+          createdBy: 'user-1',
+          callType: 'voice',
+          status: 'active',
+          participants: [
+            { userId: 'user-1', status: 'joined' },
+            { userId: 'user-2', status: 'joined' },
+          ],
+        }),
+        hasActiveInviteToken: jest.fn().mockResolvedValue(true),
+        isInvitedParticipant: jest.fn().mockResolvedValue(false),
+        setParticipantStatus: jest.fn(),
+        appendSignal: jest.fn(),
+      } as any,
+    })
+    registerCallHandlers(server as any, socket, deps)
+
+    await handlers.get('call.answer')!({ conversationId: 'conv-123', callId: 'call-1' }, ack)
+
+    expect(ack).not.toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 'CALL_FULL' }))
+    expect((deps.callsService as any).setParticipantStatus).toHaveBeenCalledWith(
+      'conv-123', 'call-1', 'user-3', 'joined',
+    )
+  })
 })

@@ -450,14 +450,28 @@ function createCallHandler(
           // through call.invite (isInvitedParticipant bypassed the
           // membership check just above, then THIS cap rejected them
           // anyway with CALL_FULL, since callToJoin.callType is still
-          // 'voice'/'video'). A 1:1 call that's had anyone invited onto it
-          // already has 3+ participant rows (call.invite's
-          // setParticipantStatus push of their 'invited' row) even before
-          // they answer — use the matching group cap once that's happened,
-          // since the call is no longer genuinely 1:1 in practice.
+          // 'voice'/'video').
+          //
+          // Checking participants.length > 2 ALONE missed the invite-LINK
+          // case (joined via GET /calls/join/:token, not call.invite): a
+          // link joiner has no pre-existing participant row the way a
+          // call.invite invitee does (that row only exists because
+          // call.invite's setParticipantStatus pushed it before they ever
+          // answered) — a link holder's first participant row is created
+          // by THIS SAME call.answer. So for a 1:1-typed call that already
+          // had its 2 original parties joined, a 3rd person resolving a
+          // valid invite link still only saw participants.length === 2 at
+          // the exact moment this check ran, stayed un-escalated, and got
+          // rejected CALL_FULL by the strict 2-cap below — "adding a
+          // participant works, joining via link doesn't" is exactly this
+          // split. isInviteLinkEligible (set above, this answerer's own
+          // bypass outcome) already says "this specific non-member join is
+          // legitimate" for both mechanisms — OR it with the participant-
+          // count check so either one alone is enough to treat the call as
+          // no longer genuinely 1:1.
           const everEscalated =
             (baseCallType === 'voice' || baseCallType === 'video') &&
-            (callToJoin?.participants ?? []).length > 2
+            (isInviteLinkEligible || (callToJoin?.participants ?? []).length > 2)
           const effectiveCallType = everEscalated
             ? (baseCallType === 'video' ? 'video-group' : 'voice-group')
             : baseCallType
@@ -910,7 +924,26 @@ function registerSocialHandlers(server: Server, socket: Socket, deps: CallsDeps)
 
     const { conversationId, callId } = v.value
     try {
-      await deps.djangoConversationClient.assertMember(principal, conversationId)
+      if (!conversationId.startsWith('standalone:')) {
+        try {
+          await deps.djangoConversationClient.assertMember(principal, conversationId)
+        } catch (membershipError) {
+          // Same bypass as call.answer/call.ice/call.end/call.knock — a
+          // non-member who received this offer via an invite link or a
+          // direct call.invite still has their own in-app ring screen
+          // mount and fire this "I'm actually ringing" signal back at the
+          // caller; this used to unconditionally reject them here and log
+          // "Not a conversation member" on every such call, even though
+          // the rejection has no visible effect on the caller (this event
+          // is fire-and-forget on the client, no ack is awaited) — fixed
+          // here anyway so the "Ringing…" label genuinely reaches the
+          // caller for these joiners too, not just existing members.
+          const isEligible =
+            !!(await deps.callsService?.hasActiveInviteToken?.(conversationId, callId)) ||
+            !!(await deps.callsService?.isInvitedParticipant?.(conversationId, callId, principal.userId))
+          if (!isEligible) throw membershipError
+        }
+      }
 
       const creator = await deps.callsService?.getCallCreator?.(conversationId, callId).catch(() => null)
       // Silently no-op rather than error if there's no creator to notify —
