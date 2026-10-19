@@ -25,6 +25,7 @@ import { InitiateUploadDto, ConfirmUploadDto } from './upload-intent.dto';
 import {
   ATTACHMENT_TTL_DAYS,
   BLOCKED_EXTENSIONS,
+  DISPLAY_URL_TTL_SECONDS,
   MAX_UPLOAD_BYTES,
   classifyKind,
   extensionFor,
@@ -289,15 +290,28 @@ export class UploadsController {
     const primaryUrl = publicStorage ? stored.url : authenticatedDownloadUrl;
     const primaryPublicUrl = publicStorage ? stored.url : undefined;
 
+    // Same fix as upload-intent.service.ts's buildAttachment: a private
+    // bucket's displayUrl used to just be authenticatedDownloadUrl, which
+    // forces Content-Disposition: attachment (see this file's own GET
+    // /uploads/file handler) - correct for an explicit download, wrong for
+    // inline preview, which silently fails to render with no visible error.
+    // A presigned GET with no responseFilename carries no disposition
+    // override, so it decodes normally - and needs no Authorization header
+    // either, since the signature is the credential.
+    const displayUrl =
+      !publicStorage && this.storage.driver() === 's3'
+        ? await this.storage.generatePresignedGet(stored.key, DISPLAY_URL_TTL_SECONDS)
+        : primaryUrl;
+
     // Files expire from S3 after 10 days. The cleanup job uses this field.
     const expiresAt = new Date(Date.now() + ATTACHMENT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     const attachmentResponse: Record<string, unknown> = {
       // id is filled in below once the UploadIntent tracking record exists —
       // never the raw storage key (stored.key stays server-side only).
-      url: primaryUrl,
+      url: displayUrl,
       publicUrl: primaryPublicUrl,
-      displayUrl: primaryUrl,
+      displayUrl,
       downloadUrl: authenticatedDownloadUrl,
       name: stored.name,
       mime: stored.mime,

@@ -29,6 +29,7 @@ import { UploadIntent, UploadIntentDocument } from './schemas/upload-intent.sche
 import {
   ATTACHMENT_TTL_DAYS,
   BLOCKED_EXTENSIONS,
+  DISPLAY_URL_TTL_SECONDS,
   MAX_UPLOAD_BYTES,
   classifyKind,
   extensionFor,
@@ -219,7 +220,7 @@ export class UploadIntentService {
       intent.attachmentId = randomUUID();
     }
 
-    const attachment = this.buildAttachment(intent, meta, params);
+    const attachment = await this.buildAttachment(intent, meta, params);
 
     // broadcast_video context: the byte transfer just happened direct-to-S3
     // (never touching Django), but the video still needs Django's
@@ -282,11 +283,11 @@ export class UploadIntentService {
     return finalAttachment;
   }
 
-  private buildAttachment(
+  private async buildAttachment(
     intent: UploadIntentDocument,
     meta: { size: number; contentType: string },
     params: ConfirmUploadParams,
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
     const actualContentType = (meta.contentType || intent.contentType).toLowerCase();
     const baseKind = guessAttachmentKind(actualContentType);
     const durationSeconds = params.durationSeconds;
@@ -298,6 +299,10 @@ export class UploadIntentService {
     // Legacy, unauthenticated key-based link — kept only for the
     // transitional compatibility window (see uploads.controller.ts). New
     // downloads should call GET /uploads/:attachmentId/download-url instead.
+    // ALWAYS forces Content-Disposition: attachment (see that controller's
+    // hardcoded header) - fine for an explicit "Download" action, wrong for
+    // inline preview, which is the only thing this URL used to be used for
+    // too (see displayUrl below).
     const authenticatedDownloadUrl = host
       ? `${proto}://${host}/uploads/file?key=${encodeURIComponent(intent.objectKey)}`
       : `/uploads/file?key=${encodeURIComponent(intent.objectKey)}`;
@@ -306,15 +311,36 @@ export class UploadIntentService {
     const publicUploadsEnabled = servesUploadsPublicly();
     const primaryUrl = publicStorage ? this.storage.publicUrlFor(intent.objectKey) : authenticatedDownloadUrl;
 
+    // CONFIRMED ROOT CAUSE of "posted an image, feed shows nothing but the
+    // download button, just dark" (part 2 - the first part, missing
+    // Authorization/X-Device-Id headers on the client's <Image> fetch, is
+    // already fixed): `displayUrl` used to just be `primaryUrl` - for any
+    // non-public bucket, that's `authenticatedDownloadUrl`, which forces
+    // Content-Disposition: attachment unconditionally. Even with the right
+    // auth headers, that disposition tells the OS's image decoder to treat
+    // the response as a non-renderable download, not an image - a
+    // genuinely separate bug from the missing-headers one, not something
+    // header auth alone could ever fix. A presigned GET generated with no
+    // responseFilename (see generatePresignedGet) carries no disposition
+    // override at all, so it decodes normally - and needs no Authorization
+    // header in the first place, since the signature itself is the
+    // credential. Capped at DISPLAY_URL_TTL_SECONDS (AWS's own 7-day max
+    // for any presigned URL) - a post viewed after that window still needs
+    // a freshly re-resolved URL, which nothing re-generates yet.
+    const displayUrl =
+      !publicStorage && this.storage.driver() === 's3'
+        ? await this.storage.generatePresignedGet(intent.objectKey, DISPLAY_URL_TTL_SECONDS)
+        : primaryUrl;
+
     const expiresAt = new Date(Date.now() + ATTACHMENT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
     const scanStatus = uploadScanStatus();
 
     const attachment: Record<string, unknown> = {
       id: intent.attachmentId,
       storageKey: intent.objectKey,
-      url: primaryUrl,
+      url: displayUrl,
       publicUrl: publicStorage ? primaryUrl : undefined,
-      displayUrl: primaryUrl,
+      displayUrl,
       downloadUrl: authenticatedDownloadUrl,
       name: intent.originalFilename,
       mime: actualContentType,

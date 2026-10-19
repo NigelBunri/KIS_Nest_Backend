@@ -101,3 +101,14 @@ export const videoCategoryForKind = (kind: string): string | undefined => {
 };
 
 export const ATTACHMENT_TTL_DAYS = Number(process.env.ATTACHMENT_TTL_DAYS || '10');
+
+// AWS SigV4's own hard cap on any presigned URL's lifetime, regardless of
+// requested value - this is the longest an inline-preview display URL
+// (see upload-intent.service.ts/uploads.controller.ts's displayUrl) can
+// possibly stay valid. A post viewed after this window needs a freshly
+// re-resolved URL (not yet built), so this is strictly better than no
+// inline preview at all, not a complete fix for arbitrarily-old content.
+export const DISPLAY_URL_TTL_SECONDS = Math.min(
+  Number(process.env.DISPLAY_URL_TTL_SECONDS) || 604800,
+  604800,
+);

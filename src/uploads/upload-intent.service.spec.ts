@@ -17,7 +17,9 @@ function makeIntentModel() {
 function makeStorage(overrides: Partial<Record<string, any>> = {}) {
   return {
     isPublic: () => false,
+    driver: () => 's3',
     generatePresignedPut: jest.fn().mockResolvedValue('https://s3.example.com/put?sig=abc'),
+    generatePresignedGet: jest.fn().mockResolvedValue('https://s3.example.com/get?sig=abc'),
     headObjectMeta: jest.fn().mockResolvedValue({ size: 17711064, contentType: 'video/mp4' }),
     publicUrlFor: (key: string) => `https://cdn.example.com/${key}`,
     ...overrides,
@@ -141,6 +143,36 @@ describe('UploadIntentService.confirm', () => {
     expect(attachment.id).not.toBe(intent.objectKey)
     expect(attachment.storageKey).toBe(intent.objectKey)
     expect(intent.attachmentId).toBe(attachment.id)
+  })
+
+  it('displayUrl is a presigned GET (no forced disposition) on a private S3 bucket, not the attachment-forcing legacy download endpoint', async () => {
+    // Regression test: displayUrl previously equaled authenticatedDownloadUrl
+    // on a private bucket - that endpoint's handler (uploads.controller.ts)
+    // ALWAYS sets Content-Disposition: attachment, which tells the client's
+    // image decoder to treat the response as a non-renderable download, not
+    // an image - inline previews (feed/community posts) silently failed to
+    // render even once the client sent the right Authorization header,
+    // which is a separate bug from the missing-header one fixed elsewhere.
+    const intent = makeConfirmableIntent({ contentType: 'image/jpeg', sizeBytes: 500_000 })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const storage = makeStorage({
+      headObjectMeta: jest.fn().mockResolvedValue({ size: 500_000, contentType: 'image/jpeg' }),
+    })
+    const service = new UploadIntentService(intentModel, storage, makeDjangoMedia())
+
+    const attachment: any = await service.confirm({
+      userId: 'user-1',
+      uploadId: intent.uploadId,
+      host: 'chat.example.com',
+      proto: 'https',
+    })
+
+    expect(storage.generatePresignedGet).toHaveBeenCalledWith(intent.objectKey, expect.any(Number))
+    expect(attachment.url).toBe('https://s3.example.com/get?sig=abc')
+    expect(attachment.displayUrl).toBe('https://s3.example.com/get?sig=abc')
+    expect(attachment.downloadUrl).toContain('/uploads/file?key=')
+    expect(attachment.url).not.toBe(attachment.downloadUrl)
   })
 
   it('rejects a storage key sent as the confirm id with a controlled 400, not a DB lookup', async () => {
