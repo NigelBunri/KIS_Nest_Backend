@@ -31,10 +31,12 @@ import {
   BLOCKED_EXTENSIONS,
   DISPLAY_URL_TTL_SECONDS,
   MAX_UPLOAD_BYTES,
+  PUBLIC_UPLOAD_PREFIX,
   classifyKind,
   extensionFor,
   guessAttachmentKind,
   isAllowedMime,
+  isPublicUploadContext,
   servesUploadsPublicly,
   uploadScanStatus,
   videoCategoryForKind,
@@ -96,7 +98,8 @@ export class UploadIntentService {
     }
 
     const safeName = filename.replace(/[^\w.\-]+/g, '_');
-    const objectKey = `${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeName}`;
+    const datedKey = `${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeName}`;
+    const objectKey = isPublicUploadContext(params.context) ? `${PUBLIC_UPLOAD_PREFIX}${datedKey}` : datedKey;
     // Deliberately a *different* random UUID than any part of objectKey —
     // this is the only value the client is allowed to send back to
     // /uploads/:id/confirm. It never contains '/', unlike objectKey.
@@ -307,7 +310,19 @@ export class UploadIntentService {
       ? `${proto}://${host}/uploads/file?key=${encodeURIComponent(intent.objectKey)}`
       : `/uploads/file?key=${encodeURIComponent(intent.objectKey)}`;
 
-    const publicStorage = this.storage.isPublic();
+    // This specific key lives under PUBLIC_UPLOAD_PREFIX (set at initiate
+    // time for context: 'feed' only - see isPublicUploadContext), which the
+    // S3 bucket policy grants public s3:GetObject on regardless of whether
+    // the REST of the bucket is public - same scoped-prefix pattern the
+    // broadcast feed's own videos/*, broadcast_videos/*, and
+    // broadcast_thumbnails/* statements already use. Treated as public
+    // independently of this.storage.isPublic() (that flag is bucket-wide),
+    // so feed/community/partner/broadcast post attachments get a real,
+    // CDN-cacheable public URL - never a presigned GET that re-signs on
+    // every view - while chat/DM/avatar media on the unprefixed key space
+    // stays exactly as private as it already was.
+    const isPublicKey = intent.objectKey.startsWith(PUBLIC_UPLOAD_PREFIX);
+    const publicStorage = this.storage.isPublic() || isPublicKey;
     const publicUploadsEnabled = servesUploadsPublicly();
     const primaryUrl = publicStorage ? this.storage.publicUrlFor(intent.objectKey) : authenticatedDownloadUrl;
 
@@ -326,7 +341,9 @@ export class UploadIntentService {
     // header in the first place, since the signature itself is the
     // credential. Capped at DISPLAY_URL_TTL_SECONDS (AWS's own 7-day max
     // for any presigned URL) - a post viewed after that window still needs
-    // a freshly re-resolved URL, which nothing re-generates yet.
+    // a freshly re-resolved URL, which nothing re-generates yet. None of
+    // this applies once the bucket policy makes the key genuinely public
+    // (isPublicKey/publicStorage above) - that URL never expires at all.
     const displayUrl =
       !publicStorage && this.storage.driver() === 's3'
         ? await this.storage.generatePresignedGet(intent.objectKey, DISPLAY_URL_TTL_SECONDS)

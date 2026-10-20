@@ -7,6 +7,20 @@ export const DEFAULT_MAX_UPLOAD_BYTES = 2_147_483_647;
 export const MAX_UPLOAD_BYTES =
   Number(process.env.UPLOAD_MAX_BYTES) || DEFAULT_MAX_UPLOAD_BYTES;
 
+// Mirrors the broadcast feed's own existing public-read S3 prefixes
+// (videos/*, broadcast_videos/*, broadcast_thumbnails/*) for feed/community
+// post attachments, which previously had no public prefix at all - every
+// upload shared the same unprefixed, bucket-policy-invisible key space as
+// private 1:1/group chat media, so the only way to serve a feed image/video
+// inline was a short-lived presigned GET (works, but re-signs on every
+// view and can't be cached by a CDN). Only 'feed' (FeedScreen.tsx's
+// composer - community, partner, and broadcast posts all share this one
+// context) gets this prefix; chat/DM/avatar/group uploads are untouched
+// and stay on the private, unprefixed key space.
+export const PUBLIC_UPLOAD_PREFIX = 'community_feed/';
+export const isPublicUploadContext = (context?: string | null): boolean =>
+  String(context || '').trim().toLowerCase() === 'feed';
+
 export const BLOCKED_EXTENSIONS = new Set([
   'apk',
   'app',

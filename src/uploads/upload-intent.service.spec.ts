@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common'
 import { UploadIntentService } from './upload-intent.service'
-import { MAX_UPLOAD_BYTES } from './upload-validation'
+import { MAX_UPLOAD_BYTES, PUBLIC_UPLOAD_PREFIX } from './upload-validation'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -116,6 +116,36 @@ describe('UploadIntentService.initiate', () => {
       service.initiate({ userId: 'user-1', filename: 'file.bin', contentType: 'application/x-bogus', sizeBytes: 100 }),
     ).rejects.toBeInstanceOf(BadRequestException)
   })
+
+  it('prefixes the storage key with PUBLIC_UPLOAD_PREFIX for context "feed" (community/partner/broadcast posts), mirroring the broadcast feed\'s own public S3 prefixes', async () => {
+    const intentModel = makeIntentModel()
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
+
+    const result = await service.initiate({
+      userId: 'user-1',
+      filename: 'photo.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 500_000,
+      context: 'feed',
+    })
+
+    expect(result.storageKey.startsWith(PUBLIC_UPLOAD_PREFIX)).toBe(true)
+  })
+
+  it('does NOT prefix the storage key for chat/DM context - private media stays on the unprefixed key space', async () => {
+    const intentModel = makeIntentModel()
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
+
+    const result = await service.initiate({
+      userId: 'user-1',
+      filename: 'photo.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 500_000,
+      context: 'chat',
+    })
+
+    expect(result.storageKey.startsWith(PUBLIC_UPLOAD_PREFIX)).toBe(false)
+  })
 })
 
 describe('UploadIntentService.confirm', () => {
@@ -173,6 +203,35 @@ describe('UploadIntentService.confirm', () => {
     expect(attachment.displayUrl).toBe('https://s3.example.com/get?sig=abc')
     expect(attachment.downloadUrl).toContain('/uploads/file?key=')
     expect(attachment.url).not.toBe(attachment.downloadUrl)
+  })
+
+  it('a key under PUBLIC_UPLOAD_PREFIX gets a real public S3 URL (never expires, no presigned GET) even when the bucket itself is private', async () => {
+    // Regression test: isPublic() alone used to decide public-vs-private
+    // for every key in the bucket - a feed-context key now lives under its
+    // own prefix with a dedicated bucket-policy public-read grant (same
+    // scoped pattern the broadcast feed's videos/*, broadcast_videos/*,
+    // broadcast_thumbnails/* statements already use), so it must be treated
+    // as public regardless of the bucket-wide isPublic() flag.
+    const intent = makeConfirmableIntent({
+      contentType: 'image/jpeg',
+      sizeBytes: 500_000,
+      objectKey: `${PUBLIC_UPLOAD_PREFIX}2026-08-02/1a55cbad-dd03-4f67-be7a-fa041dfec3da-photo.jpg`,
+    })
+    const intentModel = makeIntentModel()
+    intentModel.findOne.mockResolvedValue(intent)
+    const storage = makeStorage({
+      isPublic: () => false,
+      headObjectMeta: jest.fn().mockResolvedValue({ size: 500_000, contentType: 'image/jpeg' }),
+    })
+    const service = new UploadIntentService(intentModel, storage, makeDjangoMedia())
+
+    const attachment: any = await service.confirm({ userId: 'user-1', uploadId: intent.uploadId })
+
+    expect(storage.generatePresignedGet).not.toHaveBeenCalled()
+    expect(attachment.url).toBe(`https://cdn.example.com/${intent.objectKey}`)
+    expect(attachment.displayUrl).toBe(`https://cdn.example.com/${intent.objectKey}`)
+    expect(attachment.publicUrl).toBe(`https://cdn.example.com/${intent.objectKey}`)
+    expect(attachment.visibility).toBe('public')
   })
 
   it('rejects a storage key sent as the confirm id with a controlled 400, not a DB lookup', async () => {
