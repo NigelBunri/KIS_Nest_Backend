@@ -73,6 +73,7 @@ export const rooms = {
   convRoom: (conversationId: string) => `conv:${conversationId}`,
   threadRoom: (threadId: string) => `thread:${threadId}`,
   statusRoom: (statusId: string) => `status:${statusId}`,
+  streamRoom: (streamId: string) => `stream:${streamId}`,
 }
 
 /* =========================

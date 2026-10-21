@@ -3,6 +3,7 @@
 import { Logger } from '@nestjs/common'
 import type { Server, Socket } from 'socket.io'
 import { getPrincipal, safeEmit } from './utils'
+import { rooms } from '../../chat/chat.types'
 
 const logger = new Logger('ChatLiveHandlers')
 
@@ -24,7 +25,7 @@ export function registerLiveHandlers(
   socket: Socket,
   _deps: LiveDeps,
 ) {
-  const streamRoom = (streamId: string) => `stream:${streamId}`
+  const streamRoom = rooms.streamRoom
 
   async function broadcastViewerCount(streamId: string): Promise<void> {
     const room = streamRoom(streamId)

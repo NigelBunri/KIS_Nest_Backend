@@ -327,3 +327,87 @@ describe('RealtimeInternalController.statusDiscussionBroadcast', () => {
     expect(result).toEqual({ ok: true })
   })
 })
+
+describe('RealtimeInternalController.handleChannelEvent', () => {
+  it('fans out the event to each user room', () => {
+    const { gateway, to, emit } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    const result = controller.handleChannelEvent('channel-1', {
+      event: 'channel.live.started',
+      userIds: ['user-1', 'user-2'],
+      data: { streamId: 'stream-1' },
+    })
+
+    expect(result).toEqual({ ok: true, emitted: 2 })
+    expect(to).toHaveBeenCalledWith('user:user-1')
+    expect(to).toHaveBeenCalledWith('user:user-2')
+    expect(emit).toHaveBeenCalledWith(
+      'channel.live.started',
+      expect.objectContaining({ channelId: 'channel-1', userId: 'user-1', data: { streamId: 'stream-1' } }),
+    )
+  })
+
+  it('returns ok:false when event or userIds is missing', () => {
+    const { gateway } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    expect(controller.handleChannelEvent('channel-1', { userIds: ['user-1'] })).toEqual({ ok: false })
+    expect(controller.handleChannelEvent('channel-1', { event: 'channel.live.ended', userIds: [] })).toEqual({ ok: false })
+  })
+
+  it('does not throw when the gateway server is unavailable', () => {
+    const controller = new RealtimeInternalController({ server: null } as any, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    const result = controller.handleChannelEvent('channel-1', {
+      event: 'channel.subscribed',
+      userIds: ['user-1'],
+    })
+
+    expect(result).toEqual({ ok: true, emitted: 1 })
+  })
+})
+
+describe('RealtimeInternalController.liveStreamBroadcast', () => {
+  it('emits the given event+payload to the stream room', () => {
+    const { gateway, to, emit } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    const result = controller.liveStreamBroadcast('stream-1', {
+      event: 'channel.chat.message',
+      payload: { streamId: 'stream-1', id: 'msg-1', userId: 'user-1', displayName: 'Jane', text: 'hi', sentAt: '2026-01-01T00:00:00Z' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(to).toHaveBeenCalledWith('stream:stream-1')
+    expect(emit).toHaveBeenCalledWith(
+      'channel.chat.message',
+      expect.objectContaining({ streamId: 'stream-1', text: 'hi', displayName: 'Jane' }),
+    )
+  })
+
+  it('rejects a missing streamId or event', () => {
+    const { gateway } = makeGateway()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, {} as any)
+
+    expect(() => controller.liveStreamBroadcast('', { event: 'channel.chat.message' })).toThrow(
+      'streamId and event are required.',
+    )
+    expect(() => controller.liveStreamBroadcast('stream-1', {})).toThrow(
+      'streamId and event are required.',
+    )
+  })
+
+  it('does not throw when the gateway server is unavailable', () => {
+    const controller = new RealtimeInternalController(
+      { server: null } as any,
+      {} as any,
+      makeMessagesService(),
+      {} as any,
+      {} as any,
+    )
+
+    const result = controller.liveStreamBroadcast('stream-1', { event: 'channel.chat.message' })
+    expect(result).toEqual({ ok: true })
+  })
+})

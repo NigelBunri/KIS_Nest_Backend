@@ -40,6 +40,17 @@ type StatusDiscussionBroadcastPayload = {
   payload?: Record<string, unknown>
 }
 
+type ChannelEventPayload = {
+  event?: string
+  userIds?: string[]
+  data?: Record<string, unknown>
+}
+
+type LiveStreamBroadcastPayload = {
+  event?: string
+  payload?: Record<string, unknown>
+}
+
 @Controller('internal')
 @UseGuards(InternalAuthGuard)
 export class RealtimeInternalController {
@@ -240,6 +251,67 @@ export class RealtimeInternalController {
     }
 
     return { ok: true, emitted: userIds.length }
+  }
+
+  // Django calls this for broadcast-channel events whose audience is
+  // "people not necessarily watching right now" (a channel going live, a
+  // stream ending, a new piece of content published, a subscription
+  // confirmed) — see apps.broadcasts.realtime.notify_nest_of_channel_event
+  // on the Django side. Same generic per-user-room fan-out shape as
+  // partners/:partnerId/events and communities/:communityId/events above;
+  // the channelId itself isn't a socket room any client joins (unlike a
+  // live stream's own room - see live-streams/:streamId/broadcast below),
+  // so there's nothing to emit to besides each affected user's own room.
+  @Post('broadcasts/channels/:channelId/events')
+  handleChannelEvent(@Param('channelId') channelId: string, @Body() payload: ChannelEventPayload) {
+    const event = String(payload?.event || '').trim()
+    const userIds = Array.from(
+      new Set((Array.isArray(payload?.userIds) ? payload.userIds : []).map((v) => String(v || '').trim()).filter(Boolean)),
+    )
+    if (!event || userIds.length === 0) {
+      return { ok: false }
+    }
+
+    const body = {
+      event,
+      channelId: String(channelId || ''),
+      data: payload?.data || {},
+      at: new Date().toISOString(),
+    }
+
+    for (const userId of userIds) {
+      try {
+        this.gateway.server?.to(rooms.userRoom(userId)).emit(event, { ...body, userId })
+      } catch {}
+    }
+
+    return { ok: true, emitted: userIds.length }
+  }
+
+  // Django calls this for a live chat message sent via the REST fallback
+  // (ChannelLiveStreamChatHistoryView.post in apps/broadcasts/views.py) so
+  // every other viewer already watching sees it without waiting on their
+  // own REST poll. Broadcasts into the same `stream:<streamId>` socket
+  // room viewers join on `channel.live.join` (see realtime/handlers/live.ts
+  // - that's also where the viewer-count room lives), not a per-user fan-
+  // out — unlike channels/:channelId/events above, anyone who cares is
+  // already sitting in this room because they have the stream open.
+  @Post('broadcasts/live-streams/:streamId/broadcast')
+  liveStreamBroadcast(
+    @Param('streamId') streamId: string,
+    @Body() body: LiveStreamBroadcastPayload,
+  ) {
+    const cleanStreamId = String(streamId || '').trim()
+    const event = String(body?.event || '').trim()
+    if (!cleanStreamId || !event) {
+      throw new BadRequestException('streamId and event are required.')
+    }
+
+    try {
+      this.gateway.server?.to(rooms.streamRoom(cleanStreamId)).emit(event, body?.payload ?? {})
+    } catch {}
+
+    return { ok: true }
   }
 
   // Django's async explicit-content scan calls this after confirming a
