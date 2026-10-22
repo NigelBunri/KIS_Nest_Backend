@@ -98,6 +98,14 @@ export class DjangoConversationClient {
   // regardless of this cache).
   private readonly canViewStatusTtlMs = 15_000;
 
+  private readonly canViewLiveStreamCache = new Map<
+    string,
+    { expiresAt: number; canView: boolean }
+  >();
+  // Same reasoning as canViewStatusTtlMs above - only gates the initial
+  // viewer-room join, not any individual REST read/write.
+  private readonly canViewLiveStreamTtlMs = 15_000;
+
   /**
    * Fetch conversation-scoped permissions from Django
    *
@@ -587,6 +595,70 @@ export class DjangoConversationClient {
       // access to a private discussion room, so an unreachable Django is
       // "can't confirm you're allowed in", not "let everyone in".
       return false;
+    }
+  }
+
+  /**
+   * Used by channel.live.join (see realtime/handlers/live.ts) before letting
+   * a socket subscribe to a live stream's viewer-count/live-chat-broadcast
+   * room - without this, anyone could join stream:{id} by guessing/leaking
+   * a stream id and observe a private channel's viewer count or live chat
+   * even though the REST live-stream detail endpoint 404s them. Mirrors
+   * canViewStatus above exactly (same cache shape/TTL, same fail-closed
+   * posture on an unreachable Django).
+   */
+  async canViewLiveStream(userId: string, streamId: string): Promise<boolean> {
+    const cacheKey = `${userId}:${streamId}`;
+    const now = Date.now();
+    const cached = this.canViewLiveStreamCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.canView;
+    }
+
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/broadcasts/live-streams/${streamId}/can-view/?user_id=${encodeURIComponent(userId)}` : undefined;
+    if (!url) return false;
+
+    try {
+      const res = await firstValueFrom(
+        this.http.get<{ can_view?: boolean }>(url, {
+          headers: {
+            ...signedInternalHeaders({ method: 'GET', url, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
+          },
+          timeout: 5000,
+        }),
+      );
+      const canView = Boolean(res?.data?.can_view);
+      this.canViewLiveStreamCache.set(cacheKey, { expiresAt: now + this.canViewLiveStreamTtlMs, canView });
+      return canView;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fire-and-forget: reports the exact socket-room viewer count (real
+   * connected-socket count, not an approximation) to Django after every
+   * channel.viewer.count broadcast (live.ts), so Django's peak_viewer_count
+   * tracking has a precise number to fold in via _bump_peak_viewer_count,
+   * instead of Nest's count only ever existing client-side. Never blocks
+   * the caller on failure - losing one count report isn't worth delaying
+   * or erroring the viewer-count broadcast itself.
+   */
+  async reportViewerCount(streamId: string, count: number): Promise<void> {
+    const base = this.djangoApiBase();
+    const url = base ? `${base}/broadcasts/live-streams/${streamId}/viewer-count-report/` : undefined;
+    if (!url) return;
+    const body = { count };
+    try {
+      await firstValueFrom(
+        this.http.post(url, body, {
+          headers: signedInternalHeaders({ method: 'POST', url, body, secret: process.env.DJANGO_INTERNAL_TOKEN ?? '' }),
+          timeout: 5000,
+        }),
+      );
+    } catch (err: any) {
+      this.logger.warn(`[reportViewerCount] Django unreachable for stream=${streamId}: ${err?.message ?? 'unknown error'}`);
     }
   }
 
