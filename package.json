@@ -98,27 +98,5 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
-  },
-  "pnpm": {
-    "overrides": {
-      "@fastify/middie": "9.3.2",
-      "@fastify/static": "9.1.1",
-      "@isaacs/brace-expansion": "5.0.1",
-      "@nestjs/common": "11.1.18",
-      "@nestjs/core": "11.1.18",
-      "@nestjs/platform-fastify": "11.1.18",
-      "ajv": "8.18.0",
-      "axios": "1.15.0",
-      "body-parser": "2.2.1",
-      "fastify": "5.8.5",
-      "follow-redirects": "1.16.0",
-      "glob": "11.1.0",
-      "lodash": "4.18.1",
-      "minimatch": "10.2.3",
-      "multer": "2.1.1",
-      "path-to-regexp": "8.4.2",
-      "qs": "6.14.2",
-      "socket.io-parser": "4.2.6"
-    }
   }
 }
