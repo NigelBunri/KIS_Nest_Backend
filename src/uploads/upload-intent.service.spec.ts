@@ -146,6 +146,21 @@ describe('UploadIntentService.initiate', () => {
 
     expect(result.storageKey.startsWith(PUBLIC_UPLOAD_PREFIX)).toBe(false)
   })
+
+  it('prefixes the storage key with PUBLIC_UPLOAD_PREFIX for context "broadcast_live_wait_media" - a live stream\'s wait-screen asset is saved permanently on the stream row and must stay publicly viewable for as long as the stream is scheduled/live, not expire with a presigned GET', async () => {
+    const intentModel = makeIntentModel()
+    const service = new UploadIntentService(intentModel, makeStorage(), makeDjangoMedia())
+
+    const result = await service.initiate({
+      userId: 'user-1',
+      filename: 'wait-screen.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 500_000,
+      context: 'broadcast_live_wait_media',
+    })
+
+    expect(result.storageKey.startsWith(PUBLIC_UPLOAD_PREFIX)).toBe(true)
+  })
 })
 
 describe('UploadIntentService.confirm', () => {

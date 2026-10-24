@@ -13,13 +13,22 @@ export const MAX_UPLOAD_BYTES =
 // upload shared the same unprefixed, bucket-policy-invisible key space as
 // private 1:1/group chat media, so the only way to serve a feed image/video
 // inline was a short-lived presigned GET (works, but re-signs on every
-// view and can't be cached by a CDN). Only 'feed' (FeedScreen.tsx's
-// composer - community, partner, and broadcast posts all share this one
-// context) gets this prefix; chat/DM/avatar/group uploads are untouched
-// and stay on the private, unprefixed key space.
+// view and can't be cached by a CDN).
 export const PUBLIC_UPLOAD_PREFIX = 'community_feed/';
+// CONFIRMED ROOT CAUSE of live-stream "wait screen" images/videos going
+// dead: LiveControlRoom.tsx uploads this asset under context
+// 'broadcast_live_wait_media' and saves the returned URL permanently on
+// the ChannelLiveStream row (thumbnail_url) - but that context wasn't in
+// this allowlist, so it silently fell onto the *private*, unprefixed key
+// space and got back a presigned GET capped at DISPLAY_URL_TTL_SECONDS
+// (7 days) with no re-signing path yet. A stream scheduled more than a
+// week out, or simply viewed by an anonymous/non-owner viewer after that
+// window, saw a dead URL - this isn't short-lived content like a DM
+// attachment, it has to stay valid for as long as the stream stays
+// scheduled/live. Same reasoning as 'feed' above, now extended here.
+const PUBLIC_UPLOAD_CONTEXTS = new Set(['feed', 'broadcast_live_wait_media']);
 export const isPublicUploadContext = (context?: string | null): boolean =>
-  String(context || '').trim().toLowerCase() === 'feed';
+  PUBLIC_UPLOAD_CONTEXTS.has(String(context || '').trim().toLowerCase());
 
 export const BLOCKED_EXTENSIONS = new Set([
   'apk',
