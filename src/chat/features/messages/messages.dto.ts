@@ -8,6 +8,7 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
   ArrayMaxSize,
@@ -185,6 +186,20 @@ export class BibleVerseDto {
   @IsOptional() @IsString() text?: string;
 }
 
+export class BookPassageDto {
+  @IsString() bookId!: string;
+  @IsString() bookTitle!: string;
+  @IsOptional() @IsString() authorName?: string;
+  @IsString() chapterStableId!: string;
+  @IsOptional() @IsString() blockId?: string;
+  // Controlled sharing: a passage is an excerpt/quote, never a chapter or
+  // book dump - this is enforced again (defense-in-depth) by the Mongoose
+  // schema's own maxlength on this field. The source highlight itself is
+  // already capped server-side by apps.books.services.create_highlight, so
+  // honest clients never hit this; it only stops a modified client.
+  @IsString() @MaxLength(540) quotedText!: string;
+}
+
 export class BibleGameStatsDto {
   @IsIn(['game', 'general']) scope!: 'game' | 'general';
 
@@ -338,6 +353,11 @@ export class SendMessageDto {
   @ValidateNested()
   @Type(() => BibleVerseDto)
   bibleVerse?: BibleVerseDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BookPassageDto)
+  bookPassage?: BookPassageDto;
 
   @IsOptional()
   @ValidateNested()

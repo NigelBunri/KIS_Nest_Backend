@@ -189,6 +189,26 @@ class BibleVerse {
 const BibleVerseSchema = SchemaFactory.createForClass(BibleVerse);
 
 @Schema({ _id: false })
+class BookPassage {
+  // Which book/chapter/block this excerpt was anchored to in
+  // apps.books.models.BookHighlight (Django) - lets the receiving client
+  // deep-link straight back into the real, access-controlled book instead
+  // of the chat message being the only copy of the content.
+  @Prop({ required: true }) bookId!: string;
+  @Prop({ required: true }) bookTitle!: string;
+  @Prop() authorName?: string;
+  @Prop({ required: true }) chapterStableId!: string;
+  @Prop() blockId?: string;
+  // Controlled sharing: the source highlight is already capped server-side
+  // (apps.books.services.create_highlight truncates to
+  // MAX_HIGHLIGHT_CHARS) - this maxlength is defense-in-depth so a modified
+  // client still can't use this field to smuggle a whole chapter/book
+  // through chat.
+  @Prop({ required: true, maxlength: 540 }) quotedText!: string;
+}
+const BookPassageSchema = SchemaFactory.createForClass(BookPassage);
+
+@Schema({ _id: false })
 class BibleGameStats {
   // 'game' = one game's own progress; 'general' = the cross-game overall
   // summary. Flat optional-fields shape (not a real Mongo discriminator)
@@ -298,7 +318,8 @@ export type MessageKind =
   | 'call_event'
   | 'bible_verse'
   | 'bible_game_stats'
-  | 'bible_discipleship_stats';
+  | 'bible_discipleship_stats'
+  | 'book_passage';
 
 @Schema({
   timestamps: true,
@@ -321,7 +342,7 @@ export class Message {
 
   @Prop({
     required: true,
-    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'payment', 'call_event', 'bible_verse', 'bible_game_stats', 'bible_discipleship_stats'],
+    enum: ['text', 'attachment', 'voice', 'styled_text', 'sticker', 'system', 'contacts', 'poll', 'event', 'location', 'payment', 'call_event', 'bible_verse', 'bible_game_stats', 'bible_discipleship_stats', 'book_passage'],
   })
   kind!: MessageKind;
 
@@ -377,6 +398,9 @@ export class Message {
 
   @Prop({ type: BibleVerseSchema })
   bibleVerse?: BibleVerse;
+
+  @Prop({ type: BookPassageSchema })
+  bookPassage?: BookPassage;
 
   @Prop({ type: BibleGameStatsSchema })
   bibleGameStats?: BibleGameStats;

@@ -28,6 +28,7 @@ const MESSAGE_CONTENT_FIELDS_UNSET = {
   location: '',
   payment: '',
   bibleVerse: '',
+  bookPassage: '',
   bibleGameStats: '',
   bibleDiscipleshipStats: '',
   linkPreview: '',
@@ -166,6 +167,7 @@ export class MessagesService {
       location: (input as any).location,
       payment: (input as any).payment,
       bibleVerse: (input as any).bibleVerse,
+      bookPassage: (input as any).bookPassage,
       bibleGameStats: (input as any).bibleGameStats,
       bibleDiscipleshipStats: (input as any).bibleDiscipleshipStats,
       linkPreview: (input as any).linkPreview,
@@ -809,6 +811,7 @@ export class MessagesService {
       'bible_verse',
       'bible_game_stats',
       'bible_discipleship_stats',
+      'book_passage',
     ])
     if (!allowedKinds.has(kind)) throw new BadRequestException(`Unsupported kind: ${String(kind)}`)
     if (hasEncryptedPayload) return
@@ -827,6 +830,7 @@ export class MessagesService {
     const hasLocation = !!(input as any).location
     const hasPayment = !!(input as any).payment
     const hasBibleVerse = !!(input as any).bibleVerse
+    const hasBookPassage = !!(input as any).bookPassage
     const hasBibleGameStats = !!(input as any).bibleGameStats
     const hasBibleDiscipleshipStats = !!(input as any).bibleDiscipleshipStats
 
@@ -866,6 +870,9 @@ export class MessagesService {
       case 'bible_verse':
         if (!hasBibleVerse) throw new BadRequestException('bible_verse requires bibleVerse payload')
         break
+      case 'book_passage':
+        if (!hasBookPassage) throw new BadRequestException('book_passage requires bookPassage payload')
+        break
       case 'bible_game_stats':
         if (!hasBibleGameStats) throw new BadRequestException('bible_game_stats requires bibleGameStats payload')
         break
@@ -889,6 +896,7 @@ export class MessagesService {
     if (kind !== 'location' && hasLocation) throw new BadRequestException('location payload only allowed for location kind')
     if (kind !== 'payment' && hasPayment) throw new BadRequestException('payment payload only allowed for payment kind')
     if (kind !== 'bible_verse' && hasBibleVerse) throw new BadRequestException('bibleVerse payload only allowed for bible_verse kind')
+    if (kind !== 'book_passage' && hasBookPassage) throw new BadRequestException('bookPassage payload only allowed for book_passage kind')
     if (kind !== 'bible_game_stats' && hasBibleGameStats) throw new BadRequestException('bibleGameStats payload only allowed for bible_game_stats kind')
     if (kind !== 'bible_discipleship_stats' && hasBibleDiscipleshipStats) throw new BadRequestException('bibleDiscipleshipStats payload only allowed for bible_discipleship_stats kind')
   }
@@ -930,6 +938,8 @@ export class MessagesService {
       }
       case 'bible_verse':
         return `📖 ${(input as any).bibleVerse?.reference ?? 'Bible verse'}`
+      case 'book_passage':
+        return `📚 ${(input as any).bookPassage?.bookTitle ?? 'Book passage'}`
       case 'bible_game_stats': {
         const stats = (input as any).bibleGameStats
         return stats?.scope === 'general'
