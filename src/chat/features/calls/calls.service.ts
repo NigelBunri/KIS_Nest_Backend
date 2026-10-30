@@ -146,6 +146,15 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
    * upsertState({ conversationId, state })
    *
    * "state" shape is frontend/gateway-defined; we do best-effort mapping.
+   *
+   * Naming collision, not functional duplication — found during the KIS
+   * calling-system audit (docs/calling/CALLING_SYSTEM_AUDIT.md): the
+   * separate, UNUSED `CallStateService` (./call-state.service.ts) has its
+   * own unrelated `upsertState` method against a different (dead)
+   * collection. This one — on the real, live `CallsService` — is the one
+   * `handlers/calls.ts:423` actually calls. Not renamed here since it's a
+   * live interface method with one real call site; flagged in comments on
+   * both sides instead to avoid conflating the two at a glance.
    */
   async upsertState(args: { conversationId: string; state: any }): Promise<void> {
     const s = args.state ?? {}
@@ -466,12 +475,32 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
   ): Promise<CallSession | null> {
     const now = new Date()
 
-    const call = await this.calls.findOne({ conversationId, callId }).lean()
-    if (!call) return null
+    // Atomic update-if-present: the old implementation read the call with
+    // a separate findOne, decided in JS whether this user already had a
+    // participant row, and only THEN wrote — leaving a real window for a
+    // second concurrent writer (e.g. an answer racing a decline from two
+    // devices of the same user, or a duplicate/out-of-order socket event)
+    // to land in between the read and the write and get silently
+    // clobbered by whichever write happened to finish last. Folding the
+    // existence check and the write into one conditional updateOne closes
+    // that window — matchedCount tells us whether the row existed at the
+    // moment of the write itself, not at some earlier read.
+    const update: any = { 'participants.$.status': status }
+    if (reason !== undefined) update['participants.$.reason'] = reason ?? null
+    if (status === 'joined') update['participants.$.joinedAt'] = now
+    if (status === 'left' || status === 'rejected' || status === 'busy') update['participants.$.leftAt'] = now
 
-    const existing = call.participants.find((p) => p.userId === userId)
+    const result = await this.calls.updateOne(
+      { conversationId, callId, 'participants.userId': userId },
+      { $set: update },
+    )
 
-    if (!existing) {
+    if (result.matchedCount === 0) {
+      // Either a genuinely new participant, or the call doesn't exist at
+      // all — $push is itself atomic, and a non-matching {conversationId,
+      // callId} simply no-ops (matchedCount 0 again), so the final
+      // findOne below still correctly returns null for a nonexistent call
+      // without needing an upfront existence check.
       await this.calls.updateOne(
         { conversationId, callId },
         {
@@ -488,17 +517,6 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
             },
           },
         },
-      )
-    } else {
-      const update: any = { 'participants.$.status': status }
-      if (reason !== undefined) update['participants.$.reason'] = reason ?? null
-
-      if (status === 'joined') update['participants.$.joinedAt'] = now
-      if (status === 'left' || status === 'rejected' || status === 'busy') update['participants.$.leftAt'] = now
-
-      await this.calls.updateOne(
-        { conversationId, callId, 'participants.userId': userId },
-        { $set: update },
       )
     }
 
