@@ -301,7 +301,7 @@ export async function runPostSendSideEffects(
   await deps.djangoConversationClient.dispatchWebhook({
     conversationId,
     event: 'message.created',
-    payload: { messageId: createdId, senderId },
+    payload: { messageId: createdId, senderId, text: preview },
   }).catch((e: any) => logger.warn('[messages] dispatchWebhook failed', e?.message))
 
   if (!deps.djangoConversationClient.listMemberIds) return
@@ -585,12 +585,12 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
           action: 'edit',
         })
       }
+      const hasEncryptedPayload = !!(
+        payload?.ciphertext ||
+        payload?.encryptionMeta ||
+        payload?.encrypted
+      )
       if (deps.djangoConversationClient.policyCheck) {
-        const hasEncryptedPayload = !!(
-          payload?.ciphertext ||
-          payload?.encryptionMeta ||
-          payload?.encrypted
-        )
         stage = 'edit.policy_check'
         const policy = await deps.djangoConversationClient.policyCheck({
           principal,
@@ -618,12 +618,16 @@ export function registerMessageHandlers(server: Server, socket: Socket, deps: Me
 
       safeEmit(server, rooms.convRoom(conversationId), EVT.EDIT, updated)
       try {
+        // Same encrypted-conversation redaction as the create path
+        // (hasEncryptedPayload, computed above for policyCheck) - never
+        // forward plaintext for an E2E-encrypted message.
         await deps.djangoConversationClient.dispatchWebhook({
           conversationId,
           event: 'message.edited',
           payload: {
             messageId,
             senderId: principal.userId,
+            text: hasEncryptedPayload ? 'Encrypted message' : ((updated as any)?.text ?? payload?.text),
           },
         })
       } catch {}
