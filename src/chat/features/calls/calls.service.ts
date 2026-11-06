@@ -118,7 +118,22 @@ export class CallsService implements OnModuleInit, OnModuleDestroy {
     callId: string,
     userId: string,
     onExpire: () => void | Promise<void>,
-    graceMs = 20_000,
+    // Was 20_000. Too short for the thing this mechanism exists to tolerate:
+    // ordinary app backgrounding (switching apps, taking a different call,
+    // checking a notification) routinely keeps a mobile socket disconnected
+    // for well over 20s even once CallKit/ConnectionService keeps the app
+    // process alive in the background — the OS can suspend/throttle network
+    // sockets independently of process survival, and the client's own
+    // reconnection backoff (SocketProvider.tsx, reconnectionDelayMax: 8000)
+    // can itself eat several seconds before even attempting the reconnect
+    // that would cancel this timer via call.sync. 45s keeps this inside the
+    // same order of magnitude as the other call-lifecycle timeouts already
+    // in this codebase (SocketProvider.tsx's 45s unanswered-call ring
+    // timeout, notifications.service.ts's 60s VoIP push expiry, the 90s
+    // stale-ring reaper) rather than being the shortest, most trigger-happy
+    // timer in the whole system for a case (temporary backgrounding) that
+    // is supposed to be the most tolerant one.
+    graceMs = 45_000,
   ): void {
     this.cancelDisconnectGrace(conversationId, callId, userId)
     const key = this.disconnectGraceKey(conversationId, callId, userId)

@@ -20,6 +20,22 @@ import {
 
 const logger = new Logger('ChatCallHandlers')
 
+// ─── Screen-share ownership ────────────────────────────────────────────────
+// Tracks who, if anyone, is currently sharing their screen in a given
+// conversation's call, so a second participant starting a share while one is
+// already in progress can be rejected with a clear reason instead of both
+// screen tracks silently colliding on every peer connection (last
+// replaceTrack()/addTrack() call wins, with no participant told why the
+// picture just changed). Keyed by conversationId rather than callId: a
+// CallSession's schema enforces at most one active call per conversation
+// (unique partial index - see call-session.schema.ts), so conversationId is
+// already a safe, stable "current call" key with no extra DB round trip and
+// no client-side payload changes required. Cleared when the sharer
+// explicitly stops, leaves the call, or the call ends (see
+// registerLeaveHandler and the CALL_END branch below) - never left dangling
+// for a conversation with no active call.
+const activeScreenSharers = new Map<string, string>() // conversationId -> userId
+
 type CallSignalPayload = Record<string, unknown> & {
   conversationId?: string
   callId?: string
@@ -641,6 +657,12 @@ function createCallHandler(
           await persistCallEndMessageIfSessionEnded(
             server, deps, conversationId, callId, principal.userId, existingCall, reason,
           )
+
+          // Whole call is over for this conversation (or at least this
+          // participant's part of it) - drop any stale screen-share
+          // ownership entry rather than leaking it in memory for a
+          // conversation with no active call.
+          if (callEndedForEveryone) activeScreenSharers.delete(conversationId)
         }
       }
 
@@ -1212,6 +1234,21 @@ function registerScreenShareHandler(server: Server, socket: Socket, deps: CallsD
       await deps.rateLimitService?.assert(principal, 'call:screen_share', 20)
       await deps.djangoConversationClient.assertMember(principal, conversationId)
 
+      // Ownership policy: block a second sharer while one is already active.
+      // See activeScreenSharers' own comment for why conversationId is the
+      // key. Allow the current sharer through (enabled:true sent twice, or
+      // the same user switching source) without re-checking against
+      // themselves.
+      if (enabled) {
+        const currentSharer = activeScreenSharers.get(conversationId)
+        if (currentSharer && currentSharer !== principal.userId) {
+          return safeAck(ack, err('Someone else is already sharing their screen', 'SCREEN_SHARE_IN_USE'))
+        }
+        activeScreenSharers.set(conversationId, principal.userId)
+      } else if (activeScreenSharers.get(conversationId) === principal.userId) {
+        activeScreenSharers.delete(conversationId)
+      }
+
       // Broadcast to all other call participants in the conversation room
       const broadcastPayload: Record<string, unknown> = {
         conversationId,
@@ -1282,6 +1319,18 @@ function registerLeaveHandler(server: Server, socket: Socket, deps: CallsDeps) {
         const count = await deps.callsService.bumpViewerCount(conversationId, callId, -1)
         safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_VIEWER_COUNT, {
           callId, conversationId, viewerCount: count,
+        })
+      }
+
+      // Lifecycle: a presenter who leaves mid-share without explicitly
+      // toggling it off first (e.g. just hangs up) must not leave every
+      // other participant's UI stuck showing them as "still sharing"
+      // forever - call.screen_share is the only event that clears that
+      // badge client-side, and nothing else fires it on a bare leave.
+      if (activeScreenSharers.get(conversationId) === principal.userId) {
+        activeScreenSharers.delete(conversationId)
+        safeEmit(server, rooms.convRoom(conversationId), EVT.CALL_SCREEN_SHARE, {
+          conversationId, callId, userId: principal.userId, enabled: false, at: leftAt,
         })
       }
 
