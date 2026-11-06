@@ -1,4 +1,4 @@
-import { registerCallHandlers, CallsDeps } from './calls'
+import { registerCallHandlers, releaseScreenShareOwnerOnDisconnect, CallsDeps } from './calls'
 
 // Regression coverage for the screen-share ownership policy added this
 // pass: previously ANY call participant could start sharing their screen
@@ -162,5 +162,116 @@ describe('call.leave clears a stale screen-share badge when the presenter leaves
     const convRoomEmit = emitsByRoom.get('conv:conv-ss-6')
     const screenShareCalls = (convRoomEmit?.mock.calls ?? []).filter(([event]) => event === 'call.screen_share')
     expect(screenShareCalls).toHaveLength(0)
+  })
+})
+
+// Regression coverage added for the follow-up pass: fire-and-forget emit on
+// the client meant a genuinely simultaneous attempt (two taps within the
+// same instant, before either device has heard about the other's) had no
+// reliable way for the loser to find out they were rejected. The ownership
+// check itself (Map.get/set, synchronous JS) was already race-free on the
+// SERVER - these tests exercise that guarantee under truly concurrent
+// (Promise.all, not sequentially-awaited) handler invocations, which is
+// the scenario the client-side ack fix now actually surfaces to the user.
+describe('call.screen_share simultaneous attempts (truly concurrent, not sequential)', () => {
+  it('grants exactly one of two participants who both request sharing at the same instant', async () => {
+    const { server } = makeServer()
+    const deps = makeDeps()
+
+    const { socket: socket1, handlers: h1 } = makeSocket('user-1')
+    registerCallHandlers(server as any, socket1, deps)
+    const { socket: socket2, handlers: h2 } = makeSocket('user-2')
+    registerCallHandlers(server as any, socket2, deps)
+
+    const ack1 = jest.fn()
+    const ack2 = jest.fn()
+    // No `await` between these two - both handlers run concurrently against
+    // the same conversationId, exactly like two users tapping "Share"
+    // within the same network round trip.
+    await Promise.all([
+      h1.get('call.screen_share')!({ conversationId: 'conv-ss-7', enabled: true }, ack1),
+      h2.get('call.screen_share')!({ conversationId: 'conv-ss-7', enabled: true }, ack2),
+    ])
+
+    const results = [ack1.mock.calls[0]?.[0], ack2.mock.calls[0]?.[0]]
+    const grants = results.filter((r) => r?.ok === true)
+    const rejections = results.filter((r) => r?.ok === false)
+    expect(grants).toHaveLength(1)
+    expect(rejections).toHaveLength(1)
+    expect(rejections[0]).toEqual(expect.objectContaining({ code: 'SCREEN_SHARE_IN_USE' }))
+  })
+
+  it('never reports both participants as granted, across many concurrent pairs', async () => {
+    const { server } = makeServer()
+    const deps = makeDeps()
+
+    for (let i = 0; i < 20; i++) {
+      const conversationId = `conv-ss-concurrent-${i}`
+      const { socket: socket1, handlers: h1 } = makeSocket('user-1')
+      registerCallHandlers(server as any, socket1, deps)
+      const { socket: socket2, handlers: h2 } = makeSocket('user-2')
+      registerCallHandlers(server as any, socket2, deps)
+
+      const ack1 = jest.fn()
+      const ack2 = jest.fn()
+      await Promise.all([
+        h1.get('call.screen_share')!({ conversationId, enabled: true }, ack1),
+        h2.get('call.screen_share')!({ conversationId, enabled: true }, ack2),
+      ])
+
+      const grants = [ack1.mock.calls[0]?.[0], ack2.mock.calls[0]?.[0]].filter((r) => r?.ok === true)
+      expect(grants).toHaveLength(1)
+    }
+  })
+})
+
+// Regression coverage for the follow-up pass's second fix: a presenter whose
+// socket merely disconnects (backgrounded, network drop, killed) never hit
+// registerLeaveHandler's cleanup (that only runs for an explicit call.leave)
+// - without releaseScreenShareOwnerOnDisconnect, the ownership lock stayed
+// held forever for a sharer who was never coming back.
+describe('releaseScreenShareOwnerOnDisconnect (disconnect-grace cleanup)', () => {
+  it('clears the lock when called for the actual current sharer', async () => {
+    const { server } = makeServer()
+    const deps = makeDeps()
+    const { socket, handlers } = makeSocket('user-1')
+    registerCallHandlers(server as any, socket, deps)
+
+    await handlers.get('call.screen_share')!({ conversationId: 'conv-ss-8', enabled: true }, jest.fn())
+
+    expect(releaseScreenShareOwnerOnDisconnect('conv-ss-8', 'user-1')).toBe(true)
+
+    // And sharing must actually be free again for the next participant -
+    // mirrors the "frees up sharing for others" test above, but via the
+    // disconnect path instead of an explicit stop/leave.
+    const { socket: socket2, handlers: h2 } = makeSocket('user-2')
+    registerCallHandlers(server as any, socket2, deps)
+    const ack2 = jest.fn()
+    await h2.get('call.screen_share')!({ conversationId: 'conv-ss-8', enabled: true }, ack2)
+    expect(ack2).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+  })
+
+  it('does nothing and returns false when called for a user who is not the current sharer', async () => {
+    const { server } = makeServer()
+    const deps = makeDeps()
+    const { socket, handlers } = makeSocket('user-1')
+    registerCallHandlers(server as any, socket, deps)
+
+    await handlers.get('call.screen_share')!({ conversationId: 'conv-ss-9', enabled: true }, jest.fn())
+
+    // user-2 disconnecting must not clear user-1's lock.
+    expect(releaseScreenShareOwnerOnDisconnect('conv-ss-9', 'user-2')).toBe(false)
+
+    const { socket: socket3, handlers: h3 } = makeSocket('user-3')
+    registerCallHandlers(server as any, socket3, deps)
+    const ack3 = jest.fn()
+    await h3.get('call.screen_share')!({ conversationId: 'conv-ss-9', enabled: true }, ack3)
+    expect(ack3).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, code: 'SCREEN_SHARE_IN_USE' }),
+    )
+  })
+
+  it('returns false and is a no-op for a conversation with no active sharer at all', () => {
+    expect(releaseScreenShareOwnerOnDisconnect('conv-ss-10-never-shared', 'user-1')).toBe(false)
   })
 })

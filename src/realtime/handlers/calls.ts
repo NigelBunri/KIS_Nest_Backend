@@ -31,10 +31,37 @@ const logger = new Logger('ChatCallHandlers')
 // (unique partial index - see call-session.schema.ts), so conversationId is
 // already a safe, stable "current call" key with no extra DB round trip and
 // no client-side payload changes required. Cleared when the sharer
-// explicitly stops, leaves the call, or the call ends (see
-// registerLeaveHandler and the CALL_END branch below) - never left dangling
-// for a conversation with no active call.
+// explicitly stops, leaves the call, the call ends (see registerLeaveHandler
+// and the CALL_END branch below), or their socket disconnects without an
+// explicit leave (see releaseScreenShareOwnerOnDisconnect below) - never
+// left dangling for a conversation with no active call.
 const activeScreenSharers = new Map<string, string>() // conversationId -> userId
+
+/**
+ * Clears conversationId's active-sharer entry if, and only if, userId is
+ * the one currently holding it - used by chat.gateway.ts's disconnect-grace
+ * expiry handler, which previously had NO call into this module at all.
+ *
+ * Root cause this closes: a presenter whose socket merely DISCONNECTS
+ * (backgrounded, network drop, app killed) without emitting an explicit
+ * call.leave never hit registerLeaveHandler's existing screen-share
+ * cleanup below - only the disconnect-grace timer's own participant-status
+ * cleanup ran, which knows nothing about activeScreenSharers. Once the
+ * grace period expired, this conversation's share-ownership lock stayed
+ * held by a user who was never coming back, permanently blocking every
+ * other participant from ever starting a share in that call (the
+ * SCREEN_SHARE_IN_USE rejection would fire forever, for a share that no
+ * longer exists).
+ *
+ * Returns whether an entry was actually cleared, so the caller knows
+ * whether it's worth emitting a call.screen_share enabled:false to the
+ * room (no-op emit otherwise - nobody else needs telling nothing changed).
+ */
+export function releaseScreenShareOwnerOnDisconnect(conversationId: string, userId: string): boolean {
+  if (activeScreenSharers.get(conversationId) !== userId) return false
+  activeScreenSharers.delete(conversationId)
+  return true
+}
 
 type CallSignalPayload = Record<string, unknown> & {
   conversationId?: string

@@ -31,6 +31,7 @@ import { PinsService } from '../chat/features/pins/pins.service';
 import { StarsService } from '../chat/features/stars/stars.service';
 import { ThreadsService } from '../chat/features/threads/threads.service';
 import { registerRealtimeHandlers } from './handlers';
+import { releaseScreenShareOwnerOnDisconnect } from './handlers/calls';
 import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
 import { SfuService } from './sfu/sfu.service';
@@ -199,6 +200,24 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
                 reason: 'disconnected',
                 leftAt: new Date().toISOString(),
               });
+              // A presenter whose socket merely disconnected (backgrounded,
+              // network drop, killed) - as opposed to an explicit call.leave,
+              // which registerLeaveHandler already covers - never otherwise
+              // clears calls.ts's activeScreenSharers lock for this
+              // conversation. Left uncleared, it would permanently block
+              // every other participant from ever starting a share in this
+              // call once the grace period above expires for real, since the
+              // original sharer is never coming back. See
+              // releaseScreenShareOwnerOnDisconnect's own comment.
+              if (releaseScreenShareOwnerOnDisconnect(call.conversationId, principal.userId)) {
+                this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_SCREEN_SHARE, {
+                  conversationId: call.conversationId,
+                  callId: call.callId,
+                  userId: principal.userId,
+                  enabled: false,
+                  at: new Date().toISOString(),
+                });
+              }
             },
           );
         }
