@@ -3,7 +3,9 @@ import { RealtimeInternalController } from './internal.controller'
 function makeGateway() {
   const emit = jest.fn()
   const to = jest.fn(() => ({ emit }))
-  return { gateway: { server: { to } } as any, to, emit }
+  const socketsLeave = jest.fn()
+  const inFn = jest.fn(() => ({ socketsLeave }))
+  return { gateway: { server: { to, in: inFn } } as any, to, emit, inFn, socketsLeave }
 }
 
 function makeMessagesService(
@@ -365,6 +367,74 @@ describe('RealtimeInternalController.handleChannelEvent', () => {
     })
 
     expect(result).toEqual({ ok: true, emitted: 1 })
+  })
+})
+
+describe('RealtimeInternalController.handleConversationMembersRemoved', () => {
+  function makeConversationClient() {
+    return { invalidateMemberCache: jest.fn() } as any
+  }
+
+  it('invalidates the Django-conversation-client cache and drops the removed users out of the room', () => {
+    const { gateway, inFn, socketsLeave } = makeGateway()
+    const conversationClient = makeConversationClient()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, conversationClient)
+
+    const result = controller.handleConversationMembersRemoved({
+      conversationId: 'conv-1',
+      userIds: ['user-1', 'user-2'],
+    })
+
+    expect(result).toEqual({ ok: true, invalidated: 2 })
+    expect(conversationClient.invalidateMemberCache).toHaveBeenCalledWith('conv-1', ['user-1', 'user-2'])
+    expect(inFn).toHaveBeenCalledWith('user:user-1')
+    expect(inFn).toHaveBeenCalledWith('user:user-2')
+    expect(socketsLeave).toHaveBeenCalledWith('conv:conv-1')
+  })
+
+  it('dedupes duplicate user ids', () => {
+    const { gateway } = makeGateway()
+    const conversationClient = makeConversationClient()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, conversationClient)
+
+    const result = controller.handleConversationMembersRemoved({
+      conversationId: 'conv-1',
+      userIds: ['user-1', 'user-1', ' user-1 '],
+    })
+
+    expect(result).toEqual({ ok: true, invalidated: 1 })
+    expect(conversationClient.invalidateMemberCache).toHaveBeenCalledWith('conv-1', ['user-1'])
+  })
+
+  it('returns ok:false when conversationId or userIds is missing, and invalidates nothing', () => {
+    const { gateway } = makeGateway()
+    const conversationClient = makeConversationClient()
+    const controller = new RealtimeInternalController(gateway, {} as any, makeMessagesService(), {} as any, conversationClient)
+
+    expect(controller.handleConversationMembersRemoved({ userIds: ['user-1'] } as any)).toEqual({ ok: false })
+    expect(controller.handleConversationMembersRemoved({ conversationId: 'conv-1', userIds: [] })).toEqual({
+      ok: false,
+    })
+    expect(conversationClient.invalidateMemberCache).not.toHaveBeenCalled()
+  })
+
+  it('does not throw when the gateway server is unavailable', () => {
+    const conversationClient = makeConversationClient()
+    const controller = new RealtimeInternalController(
+      { server: null } as any,
+      {} as any,
+      makeMessagesService(),
+      {} as any,
+      conversationClient,
+    )
+
+    const result = controller.handleConversationMembersRemoved({
+      conversationId: 'conv-1',
+      userIds: ['user-1'],
+    })
+
+    expect(result).toEqual({ ok: true, invalidated: 1 })
+    expect(conversationClient.invalidateMemberCache).toHaveBeenCalledWith('conv-1', ['user-1'])
   })
 })
 

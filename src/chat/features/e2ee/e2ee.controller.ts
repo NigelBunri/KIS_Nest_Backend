@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  NotFoundException,
   Param,
   Req,
   UseGuards,
@@ -27,7 +28,13 @@ export class E2eeController {
     }
 
     await this.djangoConversationClient.assertMember(principal, conversationId)
-    const entry = await this.e2eeKeysService.ensureKey(conversationId)
+    // Only ever serves a key that already exists (legacy decrypt of
+    // pre-migration message history) - see E2eeKeysService's own doc
+    // comment (Defect D2) for why this must never mint a new one.
+    const entry = await this.e2eeKeysService.getExistingKey(conversationId)
+    if (!entry) {
+      throw new NotFoundException('No legacy encryption key for this conversation.')
+    }
     return {
       key: entry.key,
       version: entry.version,

@@ -15,6 +15,11 @@ type ConversationCreatedPayload = {
   userIds: string[]
 }
 
+type ConversationMembersRemovedPayload = {
+  conversationId: string
+  userIds: string[]
+}
+
 type MainTabBadgesUpdatedPayload = {
   event?: string
   userIds: string[]
@@ -152,6 +157,39 @@ export class RealtimeInternalController {
     }
 
     return { ok: true }
+  }
+
+  // Defect D5 (KIS_E2EE_KEY_LIFECYCLE_AUDIT.md): Django calls this the
+  // moment it records a conversation-membership removal (kick, leave, or
+  // a group/community-driven sync removal — see
+  // apps.chat.tasks.notify_nest_conversation_members_removed on the
+  // Django side) so DjangoConversationClient's wsPerms/member-id caches
+  // stop treating these users as members immediately, instead of only
+  // after their own TTL expires (up to 2 minutes). Also proactively
+  // drops any of their live sockets out of this conversation's room so
+  // an already-open connection stops receiving its broadcasts right
+  // away, not just failing the next assertMember check.
+  @Post('conversations/members/removed')
+  handleConversationMembersRemoved(@Body() payload: ConversationMembersRemovedPayload) {
+    const conversationId = String(payload?.conversationId ?? '').trim()
+    const userIds = Array.from(
+      new Set((Array.isArray(payload?.userIds) ? payload.userIds : []).map((v) => String(v || '').trim()).filter(Boolean)),
+    )
+    if (!conversationId || userIds.length === 0) {
+      return { ok: false }
+    }
+
+    this.conversationClient.invalidateMemberCache(conversationId, userIds)
+
+    for (const userId of userIds) {
+      try {
+        this.gateway.server
+          ?.in(rooms.userRoom(userId))
+          .socketsLeave(rooms.convRoom(conversationId))
+      } catch {}
+    }
+
+    return { ok: true, invalidated: userIds.length }
   }
 
   @Post('main-tab-badges/updated')

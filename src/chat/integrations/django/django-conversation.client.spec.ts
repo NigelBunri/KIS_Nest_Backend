@@ -257,3 +257,77 @@ describe('DjangoConversationClient.notifyMessageReported — mirrors a chat repo
     ).resolves.toBeUndefined()
   })
 })
+
+describe('DjangoConversationClient.invalidateMemberCache — Defect D5 (stale membership cache)', () => {
+  it('forces the next wsPerms call to re-fetch instead of serving the cached positive result', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { isMember: true, isBlocked: false } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(1)
+
+    client.invalidateMemberCache('conv-1', ['user-1'])
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not disturb a DIFFERENT user\'s cached membership for the same conversation', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { isMember: true, isBlocked: false } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    await client.wsPerms(makePrincipal({ userId: 'user-2' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(2)
+
+    client.invalidateMemberCache('conv-1', ['user-1'])
+
+    await client.wsPerms(makePrincipal({ userId: 'user-2' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(2) // user-2 still served from cache
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(3) // user-1 had to re-fetch
+  })
+
+  it('does not disturb the same user\'s cached membership for a DIFFERENT conversation', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { isMember: true, isBlocked: false } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-2')
+    expect(http.get).toHaveBeenCalledTimes(2)
+
+    client.invalidateMemberCache('conv-1', ['user-1'])
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-2')
+    expect(http.get).toHaveBeenCalledTimes(2) // conv-2 entry untouched
+  })
+
+  it('clears the cached member-id list for the conversation too', async () => {
+    const http = {
+      get: jest.fn().mockReturnValue(of({ data: { user_ids: ['user-1', 'user-2'] } })),
+    }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.listMemberIds('conv-1')
+    await client.listMemberIds('conv-1')
+    expect(http.get).toHaveBeenCalledTimes(1)
+
+    client.invalidateMemberCache('conv-1', ['user-1'])
+
+    await client.listMemberIds('conv-1')
+    expect(http.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('is a no-op for an empty or blank user id list', async () => {
+    const http = { get: jest.fn().mockReturnValue(of({ data: { isMember: true, isBlocked: false } })) }
+    const client = new DjangoConversationClient(http as any, makeMetrics())
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    client.invalidateMemberCache('conv-1', [])
+    client.invalidateMemberCache('conv-1', ['  '])
+
+    await client.wsPerms(makePrincipal({ userId: 'user-1' }), 'conv-1')
+    expect(http.get).toHaveBeenCalledTimes(1)
+  })
+})

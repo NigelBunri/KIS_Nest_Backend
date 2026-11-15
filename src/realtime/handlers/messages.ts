@@ -15,7 +15,6 @@ import {
   isBroadcastConversation,
 } from '../../chat/chat.types'
 import { getPrincipal, ok, err, safeAck, safeEmit } from './utils'
-import { E2eeKeysService } from '../../chat/features/e2ee/e2ee-keys.service'
 import {
   validateSocketPayload,
   SendMessageDto,
@@ -232,7 +231,6 @@ export interface MessagesDeps {
       userId: string
     }): Promise<any>
   }
-  e2eeKeysService: E2eeKeysService
   notificationsService?: {
     notifyNewMessage(input: {
       toUserId: string

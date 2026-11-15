@@ -239,6 +239,37 @@ export class DjangoConversationClient {
   }
 
   /**
+   * Defect D5 (KIS_E2EE_KEY_LIFECYCLE_AUDIT.md): wsPerms() above only ever
+   * caches a POSITIVE membership result (by design — a false result might
+   * just mean a brand-new member record hasn't propagated yet), and that
+   * cache has no invalidation path at all - a member removed from a
+   * conversation kept passing assertMember, and kept appearing in
+   * listMemberIds' fan-out, for up to permsTtlMs (2 minutes by default).
+   * Django's internal/conversations/members/removed endpoint
+   * (RealtimeInternalController) calls this the moment it records a
+   * removal, closing that window immediately instead of waiting it out.
+   * This only ever narrows access sooner - it never widens it, so a
+   * missed or late call degrades to the exact pre-existing TTL-bounded
+   * behavior, not a security regression.
+   */
+  invalidateMemberCache(conversationId: string, userIds: string[]): void {
+    const cleanUserIds = new Set(userIds.map((id) => String(id || '').trim()).filter(Boolean));
+    if (cleanUserIds.size === 0) return;
+
+    for (const key of this.permsCache.keys()) {
+      const [keyUserId, keyConversationId] = key.split(':');
+      if (keyConversationId === conversationId && cleanUserIds.has(keyUserId)) {
+        this.permsCache.delete(key);
+      }
+    }
+    // Membership/mute lists are conversation-scoped (not per-user), so a
+    // removal invalidates the whole cached list rather than one entry -
+    // the next read re-fetches the now-correct member set from Django.
+    this.memberIdsCache.delete(conversationId);
+    this.mutedMemberIdsCache.delete(conversationId);
+  }
+
+  /**
    * Convenience guard:
    * - must be member
    * - must not be blocked

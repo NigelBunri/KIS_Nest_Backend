@@ -32,7 +32,6 @@ import { StarsService } from '../chat/features/stars/stars.service';
 import { ThreadsService } from '../chat/features/threads/threads.service';
 import { registerRealtimeHandlers } from './handlers';
 import { releaseScreenShareOwnerOnDisconnect } from './handlers/calls';
-import { E2eeKeysService } from '../chat/features/e2ee/e2ee-keys.service';
 import { socketIoCorsOriginDelegate } from '../security/origin-policy';
 import { SfuService } from './sfu/sfu.service';
 import { ScheduledMessagesCron } from '../chat/features/scheduled-messages/scheduled-messages.cron';
@@ -42,7 +41,9 @@ import { ScheduledMessagesCron } from '../chat/features/scheduled-messages/sched
   cors: { origin: socketIoCorsOriginDelegate, credentials: true },
 })
 @UseGuards(WsAuthGuard)
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
+export class ChatGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit
+{
   @WebSocketServer()
   server!: Server;
 
@@ -62,7 +63,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     private readonly presenceService: PresenceService,
     private readonly notificationsService: NotificationsService,
     private readonly authService: DjangoAuthService,
-    private readonly e2eeKeysService: E2eeKeysService,
     private readonly pinsService: PinsService,
     private readonly starsService: StarsService,
     private readonly threadsService: ThreadsService,
@@ -110,7 +110,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         (socket.handshake?.headers as any)?.['x-device-id'];
 
       try {
-        principal = await this.authService.introspect(token, deviceId ? String(deviceId) : undefined);
+        principal = await this.authService.introspect(
+          token,
+          deviceId ? String(deviceId) : undefined,
+        );
       } catch (authErr: any) {
         this.logger.warn(
           `[WS] auth rejected socketId=${socket.id} reason=${authErr?.message ?? 'unknown'}`,
@@ -138,20 +141,54 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       moderationService: this.moderationService,
       notificationsService: this.notificationsService,
       presenceService: this.presenceService,
-      e2eeKeysService: this.e2eeKeysService,
       pinsService: this.pinsService,
       starsService: this.starsService,
       threadsService: this.threadsService,
       sfuService: this.sfuService,
     });
 
+    // Proactively cancel any pending disconnect-grace timer for every call
+    // this user is in, on every new connection — not only when the client
+    // itself gets around to emitting call.sync (see KIS_CALLING_BACKGROUND_
+    // LIFECYCLE_AUDIT.md §7/§8, finding #3). Without this, cancellation
+    // depended entirely on the client cooperating; this makes "a live
+    // connection for this user exists" the thing that actually governs
+    // whether a stale grace timer survives, regardless of what the client
+    // does or doesn't send. Fire-and-forget: a failure here must not block
+    // the handshake, and a timer that legitimately should still be running
+    // (this really is a reconnect for the SAME in-progress disconnect,
+    // which is fine — handleDisconnect schedules at most one timer per
+    // call per userId at a time) is unaffected either way.
+    this.callsService
+      .getActiveCallsForUser(principal.userId)
+      .then((activeCalls) => {
+        for (const call of activeCalls) {
+          this.callsService.cancelDisconnectGrace(
+            call.conversationId,
+            call.callId,
+            principal.userId,
+          );
+        }
+      })
+      .catch((e: any) =>
+        this.logger.warn(
+          `[WS] cancelDisconnectGrace-on-connect failed userId=${principal.userId}`,
+          e?.message,
+        ),
+      );
+
     // --- Emit readiness
     socket.emit('chat.ready', { ok: true });
 
     // --- Presence (fire-and-forget, log failures)
-    this.presenceService.markOnline(principal.userId).catch((e: any) =>
-      this.logger.warn(`[WS] markOnline failed userId=${principal.userId}`, e?.message),
-    );
+    this.presenceService
+      .markOnline(principal.userId)
+      .catch((e: any) =>
+        this.logger.warn(
+          `[WS] markOnline failed userId=${principal.userId}`,
+          e?.message,
+        ),
+      );
 
     this.logger.log(
       `[WS] connected socketId=${socket.id} userId=${principal.userId} deviceId=${principal.deviceId ?? '-'} ip=${socket.handshake.address ?? '-'} transport=${socket.conn.transport.name}`,
@@ -177,52 +214,98 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         });
       }
 
-      // Defer call cleanup for this user's active calls — a brief network
-      // blip, backgrounding, or reconnect cycle shouldn't immediately end the
-      // call. If the user's socket reconnects and re-syncs (call.sync) before
-      // the grace period expires, this scheduled cleanup is cancelled there.
-      try {
-        const activeCalls = await this.callsService.getActiveCallsForUser(principal.userId);
-        for (const call of activeCalls) {
-          this.callsService.scheduleDisconnectGrace(
-            call.conversationId,
-            call.callId,
+      // Stale-socket guard (KIS_CALLING_BACKGROUND_LIFECYCLE_AUDIT.md §7/§8,
+      // finding #3): by the time a disconnect is actually processed here,
+      // this user may already have a NEWER, live socket connected — e.g.
+      // this is a "zombie" socket whose transport died while the client
+      // was backgrounded, and the client already opened a replacement
+      // connection and re-synced the call (call.sync) before the server
+      // noticed the old transport was dead. Scheduling a fresh grace timer
+      // for a disconnect like that has nothing left to cancel it later
+      // (the cancellation that matters already happened against the OTHER
+      // socket, before this one's disconnect was even detected) — it would
+      // silently end the call out from under an actively-reconnected user
+      // ~45s from now. socket.io has already removed `socket` from every
+      // room (including the user room) by the time this handler runs, so
+      // a non-empty fetchSockets() here means a genuinely different,
+      // still-connected socket for this user, not this same one lingering.
+      const stillConnectedElsewhere =
+        (await this.server.in(rooms.userRoom(principal.userId)).fetchSockets())
+          .length > 0;
+
+      if (stillConnectedElsewhere) {
+        this.logger.log(
+          `[WS] stale disconnect for userId=${principal.userId} ignored for call-grace purposes — a newer connection is already live`,
+        );
+      } else {
+        try {
+          // Defer call cleanup for this user's active calls — a brief network
+          // blip, backgrounding, or reconnect cycle shouldn't immediately end the
+          // call. If the user's socket reconnects and re-syncs (call.sync) before
+          // the grace period expires, this scheduled cleanup is cancelled there.
+          const activeCalls = await this.callsService.getActiveCallsForUser(
             principal.userId,
-            async () => {
-              await this.callsService.setParticipantStatus(
-                call.conversationId, call.callId, principal.userId, 'left', 'disconnected',
-              );
-              await this.callsService.endIfNoActiveParticipants(call.conversationId, call.callId);
-              this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_PARTICIPANT_LEFT, {
-                callId: call.callId,
-                conversationId: call.conversationId,
-                userId: principal.userId,
-                reason: 'disconnected',
-                leftAt: new Date().toISOString(),
-              });
-              // A presenter whose socket merely disconnected (backgrounded,
-              // network drop, killed) - as opposed to an explicit call.leave,
-              // which registerLeaveHandler already covers - never otherwise
-              // clears calls.ts's activeScreenSharers lock for this
-              // conversation. Left uncleared, it would permanently block
-              // every other participant from ever starting a share in this
-              // call once the grace period above expires for real, since the
-              // original sharer is never coming back. See
-              // releaseScreenShareOwnerOnDisconnect's own comment.
-              if (releaseScreenShareOwnerOnDisconnect(call.conversationId, principal.userId)) {
-                this.server.to(rooms.convRoom(call.conversationId)).emit(EVT.CALL_SCREEN_SHARE, {
-                  conversationId: call.conversationId,
-                  callId: call.callId,
-                  userId: principal.userId,
-                  enabled: false,
-                  at: new Date().toISOString(),
-                });
-              }
-            },
+          );
+          for (const call of activeCalls) {
+            this.callsService.scheduleDisconnectGrace(
+              call.conversationId,
+              call.callId,
+              principal.userId,
+              async () => {
+                await this.callsService.setParticipantStatus(
+                  call.conversationId,
+                  call.callId,
+                  principal.userId,
+                  'left',
+                  'disconnected',
+                );
+                await this.callsService.endIfNoActiveParticipants(
+                  call.conversationId,
+                  call.callId,
+                );
+                this.server
+                  .to(rooms.convRoom(call.conversationId))
+                  .emit(EVT.CALL_PARTICIPANT_LEFT, {
+                    callId: call.callId,
+                    conversationId: call.conversationId,
+                    userId: principal.userId,
+                    reason: 'disconnected',
+                    leftAt: new Date().toISOString(),
+                  });
+                // A presenter whose socket merely disconnected (backgrounded,
+                // network drop, killed) - as opposed to an explicit call.leave,
+                // which registerLeaveHandler already covers - never otherwise
+                // clears calls.ts's activeScreenSharers lock for this
+                // conversation. Left uncleared, it would permanently block
+                // every other participant from ever starting a share in this
+                // call once the grace period above expires for real, since the
+                // original sharer is never coming back. See
+                // releaseScreenShareOwnerOnDisconnect's own comment.
+                if (
+                  releaseScreenShareOwnerOnDisconnect(
+                    call.conversationId,
+                    principal.userId,
+                  )
+                ) {
+                  this.server
+                    .to(rooms.convRoom(call.conversationId))
+                    .emit(EVT.CALL_SCREEN_SHARE, {
+                      conversationId: call.conversationId,
+                      callId: call.callId,
+                      userId: principal.userId,
+                      enabled: false,
+                      at: new Date().toISOString(),
+                    });
+                }
+              },
+            );
+          }
+        } catch (e: any) {
+          this.logger.warn(
+            `[WS] call cleanup failed userId=${principal.userId}`,
+            e?.message,
           );
         }
-      } catch (e: any) {
-        this.logger.warn(`[WS] call cleanup failed userId=${principal.userId}`, e?.message);
       }
 
       this.logger.log(
